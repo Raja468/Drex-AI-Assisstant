@@ -4,7 +4,7 @@ uvicorn[standard]==0.34.0
 python-multipart==0.0.20
 
 # Logging
-loguru==0.7.3
+loguru==0.7.3  # cache-bust: 2026-05-24.1
 
 # Core AI & ML dependencies
 annotated-types==0.7.0
