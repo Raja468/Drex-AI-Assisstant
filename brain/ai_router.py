@@ -38,7 +38,7 @@ except ImportError:
         GROQ_LLAMA_FAST = "llama-3.1-8b-instant"
         GROQ_LLAMA_SMART = "llama-3.3-70b-versatile"
         GEMINI_FLASH = "gemini-2.0-flash"
-        CEREBRAS_LLAMA = "llama-3.3-70b"
+        CEREBRAS_LLAMA = "llama3.3-70b"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -211,6 +211,13 @@ class AIRouter:
                     logger.error("🔑 {} auth failed. Skipping...", provider)
                     self._api_health[provider] = False
                     continue
+                if "CONNECTION_ERROR" in error_code or "TIMEOUT_ERROR" in error_code:
+                    logger.warning("🌐 {} network issue ({}). Trying next...", provider, error_code)
+                    time.sleep(1.0)
+                    continue
+                if "MODEL_NOT_FOUND" in error_code:
+                    logger.error("🔥 {} model config error. Skipping...", provider)
+                    continue
                 logger.error("❌ {} error: {}", provider, e)
                 continue
 
@@ -298,6 +305,14 @@ class AIRouter:
                 elif "AUTH_ERROR" in error_code:
                     logger.error("🔑 {} auth failed. Skipping...", provider)
                     self._api_health[provider] = False
+                    continue
+                elif "CONNECTION_ERROR" in error_code or "TIMEOUT_ERROR" in error_code:
+                    logger.warning("🌐 {} network issue ({}). Trying next...", provider, error_code)
+                    # Transient — do not permanently disable
+                    time.sleep(1.0)
+                    continue
+                elif "MODEL_NOT_FOUND" in error_code:
+                    logger.error("🔥 {} model config error. Skipping...", provider)
                     continue
                 else:
                     logger.error("❌ {} error: {}", provider, e)

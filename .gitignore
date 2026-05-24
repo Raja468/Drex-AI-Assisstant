@@ -42,3 +42,7 @@ tmp/
 # AI Model Cache
 models/
 cache/
+
+# Vercel deployment
+.vercel
+# .env is already ignored above

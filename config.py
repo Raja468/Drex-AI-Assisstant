@@ -31,7 +31,7 @@ class AIConfig:
     openrouter_model: str = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
     # Cerebras
     cerebras_api_key: str = os.getenv("CEREBRAS_API_KEY", "")
-    cerebras_model: str = os.getenv("CEREBRAS_MODEL", "llama-3.3-70b")
+    cerebras_model: str = os.getenv("CEREBRAS_MODEL", "llama3.3-70b")
     # General
     max_tokens: int = int(os.getenv("DREX_MAX_TOKENS", "1024"))
     temperature: float = float(os.getenv("DREX_TEMPERATURE", "0.7"))

@@ -17,6 +17,7 @@
 
 import requests
 import json
+import time
 from typing import Optional
 from utils.logger import logger
 from utils.error_handler import AIError
@@ -116,37 +117,61 @@ class OpenRouterClient:
             "max_tokens":  max_tok,
         }
 
-        try:
-            response = requests.post(
-                OPENROUTER_BASE_URL,
-                headers=self._headers,
-                json=payload,
-                timeout=30
-            )
+        # Retry with backoff for transient failures (DNS, connection, timeouts)
+        max_retries = 2
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    OPENROUTER_BASE_URL,
+                    headers=self._headers,
+                    json=payload,
+                    timeout=30
+                )
 
-            if response.status_code == 429:
-                logger.warning("OpenRouter rate limit hit")
-                raise AIError("RATE_LIMIT")
+                if response.status_code == 429:
+                    logger.warning("OpenRouter rate limit hit")
+                    raise AIError("RATE_LIMIT")
 
-            if response.status_code in (401, 403):
-                logger.error("OpenRouter auth error — check API key")
-                raise AIError("AUTH_ERROR")
+                if response.status_code in (401, 403):
+                    logger.error("OpenRouter auth error — check API key")
+                    raise AIError("AUTH_ERROR")
 
-            response.raise_for_status()
-            data = response.json()
+                response.raise_for_status()
+                data = response.json()
 
-            text = data["choices"][0]["message"]["content"].strip()
-            logger.info(f"✅ OpenRouter [{model}] responded ({len(text)} chars)")
-            return text
+                text = data["choices"][0]["message"]["content"].strip()
+                logger.info(f"✅ OpenRouter [{model}] responded ({len(text)} chars)")
+                return text
 
-        except AIError:
-            raise
-        except requests.Timeout:
-            logger.error("OpenRouter request timed out")
-            return None
-        except Exception as e:
-            logger.error(f"OpenRouter chat failed: {e}")
-            return None
+            except AIError:
+                raise
+            except requests.exceptions.ConnectionError as e:
+                logger.warning(
+                    "OpenRouter connection error (attempt {}/{}): {}",
+                    attempt + 1, max_retries, e
+                )
+                last_error = AIError("CONNECTION_ERROR")
+                if attempt < max_retries - 1:
+                    time.sleep(1.0 * (attempt + 1))  # linear backoff
+                    continue
+            except requests.Timeout as e:
+                logger.warning(
+                    "OpenRouter timeout (attempt {}/{}): {}",
+                    attempt + 1, max_retries, e
+                )
+                last_error = AIError("TIMEOUT_ERROR")
+                if attempt < max_retries - 1:
+                    time.sleep(1.0)
+                    continue
+            except Exception as e:
+                logger.error(f"OpenRouter chat failed: {e}")
+                return None
+
+        # All retries exhausted
+        if isinstance(last_error, AIError):
+            raise last_error
+        return None
 
     def quick_ask(self, question: str, system: str = "") -> Optional[str]:
         """Fast one-shot question using a small free model."""

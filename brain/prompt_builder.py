@@ -86,9 +86,15 @@ PERSONALITY_META = {
 
 TASK_PROMPTS = {
     "coding": (
-        "The user is asking a coding/programming question. "
-        "Provide clean, working code with brief explanations. "
-        "Use code blocks. Prefer Python unless another language is specified."
+        "You are a senior software engineer. The user has asked a coding or programming question. "
+        "Provide production-quality, complete, working code. "
+        "Include proper error handling, input validation, and edge case coverage. "
+        "Write idiomatic code for the requested language — do NOT write toy examples or demo code. "
+        "Use code blocks with the correct language identifier. "
+        "Include brief, professional inline comments only where logic is non-obvious. "
+        "If the problem is underspecified, ask clarifying questions or state your assumptions. "
+        "Prefer the language the user specifies; default to Python. "
+        "Follow industry best practices: use type hints, avoid global state, write reusable functions."
     ),
     "creative": (
         "The user wants creative content. "

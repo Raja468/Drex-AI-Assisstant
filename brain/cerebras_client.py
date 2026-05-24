@@ -2,12 +2,13 @@
 #  DREX - AI Desktop Assistant
 #  brain/cerebras_client.py  —  Cerebras AI Client
 #
-#  Model: llama-3.3-70b  (same as Groq but 20x faster)
+#  Model: llama3.3-70b  (Cerebras Cloud model name — no hyphens)
 #  API:   OpenAI-compatible
 #  Free:  Yes — cloud.cerebras.ai
 # ============================================================
 
 from loguru import logger
+from utils.error_handler import AIError
 from config import get_config
 
 
@@ -26,7 +27,7 @@ class CerebrasClient:
             from cerebras.cloud.sdk import Cerebras
             self._client = Cerebras(api_key=self.cfg.cerebras_api_key)
             self.is_available = True
-            logger.info("✅ CerebrasClient initialized (llama-3.3-70b)")
+            logger.info("✅ CerebrasClient initialized (llama3.3-70b)")
         except ImportError:
             logger.error("CerebrasClient: cerebras-cloud-sdk not installed. Run: pip install cerebras-cloud-sdk")
         except Exception as e:
@@ -50,5 +51,13 @@ class CerebrasClient:
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
+            error_str = str(e).lower()
+            if "429" in error_str or "rate" in error_str or "quota" in error_str:
+                raise AIError("RATE_LIMIT")
+            if "401" in error_str or "auth" in error_str or "unauthorized" in error_str:
+                raise AIError("AUTH_ERROR")
+            if "model_not_found" in error_str or "not found" in error_str:
+                logger.error("Cerebras model '{}' not found: {}", self.cfg.cerebras_model, e)
+                raise AIError("MODEL_NOT_FOUND")
             logger.error("Cerebras chat error: {}", e)
             raise
