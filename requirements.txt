@@ -4,7 +4,7 @@ uvicorn[standard]==0.34.0
 python-multipart==0.0.20
 
 # Logging
-loguru==1.0.8
+loguru==0.7.3
 
 # Core AI & ML dependencies
 annotated-types==0.7.0
