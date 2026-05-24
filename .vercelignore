@@ -6,3 +6,6 @@ venv
 __pycache__/
 .pytest_cache/
 .vscode/
+.vercel/
+uv.lock
+poetry.lock
