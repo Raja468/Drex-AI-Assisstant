@@ -3,6 +3,9 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 python-multipart==0.0.20
 
+# Logging
+loguru==1.0.8
+
 # Core AI & ML dependencies
 annotated-types==0.7.0
 anyio==4.13.0
