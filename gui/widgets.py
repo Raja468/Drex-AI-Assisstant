@@ -7,11 +7,13 @@
 #
 #  Components:
 #  - MessageBubble   — Chat message with avatar and timestamp
+#  - StreamingLabel  — Live-updating label for realtime tokens
 #  - StatusDot       — Animated pulsing status indicator
 #  - SidebarButton   — Navigation button with icon + label
 #  - AnimatedButton  — Button with hover/press color animation
 #  - CodeBlock       — Monospace code block in chat
 #  - TypingIndicator — Animated "..." dots while AI is thinking
+#  - Toast           — Floating notification
 # ============================================================
 
 import tkinter as tk
@@ -32,19 +34,21 @@ class MessageBubble(ctk.CTkFrame):
     Automatically detects and highlights code blocks.
     """
 
-    def __init__(self, parent, role: str, content: str, timestamp: str = None, **kwargs):
+    def __init__(self, parent, role: str, content: str, timestamp: str = None, provider: str = None, **kwargs):
         """
         Args:
             parent:    Parent container widget
             role:      "user" | "assistant"
             content:   Message text
             timestamp: Time string to display
+            provider:  Provider name for AI messages
         """
         super().__init__(parent, fg_color="transparent", **kwargs)
 
         self.role = role
         self.content = content
         self.timestamp = timestamp or datetime.now().strftime("%I:%M %p")
+        self.provider = provider
 
         # Style based on role
         if role == "user":
@@ -70,10 +74,6 @@ class MessageBubble(ctk.CTkFrame):
         # Outer row: avatar + bubble (or bubble + avatar for user)
         self.grid_columnconfigure(0, weight=1)
 
-        # ── Avatar label ──────────────────────────────────────
-        avatar_text = "D" if self.role == "assistant" else "U"
-        avatar_color = Colors.ACCENT if self.role == "assistant" else Colors.USER_BORDER
-
         # ── Main bubble container ─────────────────────────────
         bubble_outer = ctk.CTkFrame(
             self,
@@ -85,7 +85,7 @@ class MessageBubble(ctk.CTkFrame):
             pady=(2, 2)
         )
 
-        # Role label + timestamp row
+        # Role label + timestamp + provider row
         meta_frame = ctk.CTkFrame(bubble_outer, fg_color="transparent")
         meta_frame.pack(fill="x", padx=4, pady=(0, 2))
 
@@ -96,6 +96,14 @@ class MessageBubble(ctk.CTkFrame):
             text_color=self.label_color,
             anchor=self.anchor,
         ).pack(side="left" if self.role == "assistant" else "right")
+
+        if self.provider and self.role == "assistant":
+            ctk.CTkLabel(
+                meta_frame,
+                text=f"via {self.provider}",
+                font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.XS),
+                text_color=Colors.ACCENT_DIM,
+            ).pack(side="left" if self.role == "assistant" else "right", padx=(6, 0))
 
         ctk.CTkLabel(
             meta_frame,
@@ -152,6 +160,122 @@ class MessageBubble(ctk.CTkFrame):
             else:
                 # Code block
                 CodeBlock(parent, code=part.strip()).pack(fill="x", pady=(4, 0))
+
+
+# ─────────────────────────────────────────────────────────────
+#  STREAMING LABEL
+#  Live-updating label for realtime token rendering
+# ─────────────────────────────────────────────────────────────
+
+class StreamingLabel(ctk.CTkFrame):
+    """
+    A label that can be incrementally updated with streaming tokens.
+    Displays tokens as they arrive for a realtime typing effect.
+
+    Usage:
+        label = StreamingLabel(parent, provider="Gemini")
+        label.pack(...)
+        label.append("Hello ")
+        label.append("world!")
+        full_text = label.get_text()  # "Hello world!"
+        label.stop()
+    """
+
+    def __init__(self, parent, provider: str = "", **kwargs):
+        super().__init__(parent, fg_color="transparent", **kwargs)
+
+        self._full_text = ""
+
+        # Container bubble (AI-style)
+        bubble = ctk.CTkFrame(
+            self,
+            fg_color=Colors.AI_BG,
+            corner_radius=Sizing.RADIUS_LG,
+            border_width=1,
+            border_color=Colors.AI_BORDER,
+        )
+        bubble.pack(anchor="w", fill="x", padx=(0, 80))
+
+        # Provider badge
+        if provider:
+            badge_frame = ctk.CTkFrame(bubble, fg_color="transparent")
+            badge_frame.pack(fill="x", padx=14, pady=(8, 0))
+
+            ctk.CTkLabel(
+                badge_frame,
+                text=provider,
+                font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.XS, weight="bold"),
+                text_color=Colors.ACCENT,
+                anchor="w",
+            ).pack(fill="x")
+
+        # Streaming text label
+        self._label = ctk.CTkLabel(
+            bubble,
+            text="",
+            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.BASE),
+            text_color=Colors.TEXT_PRIMARY,
+            wraplength=Sizing.CHAT_MSG_MAX_W,
+            justify="left",
+            anchor="w",
+        )
+        self._label.pack(
+            fill="x",
+            padx=Spacing.LG,
+            pady=Spacing.MD,
+        )
+
+        # Blinking cursor indicator
+        self._cursor = ctk.CTkLabel(
+            bubble,
+            text="▍",
+            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.BASE),
+            text_color=Colors.ACCENT,
+        )
+        self._cursor.pack(side="right", padx=(0, 14), pady=(0, 12))
+        self._blink_cursor()
+
+    def _blink_cursor(self):
+        """Blink the cursor indicator while streaming."""
+        if not hasattr(self, '_cursor') or not self._cursor:
+            return
+        current = self._cursor.cget("text_color")
+        new_color = Colors.ACCENT if current == Colors.TEXT_MUTED else Colors.TEXT_MUTED
+        try:
+            self._cursor.configure(text_color=new_color)
+        except Exception:
+            pass
+        self.after(500, self._blink_cursor)
+
+    def append(self, token: str) -> None:
+        """
+        Append a token to the streaming text.
+
+        Args:
+            token: Text token to append.
+        """
+        self._full_text += token
+        try:
+            self._label.configure(text=self._full_text)
+        except Exception:
+            pass
+
+    def get_text(self) -> str:
+        """Get the full accumulated text."""
+        return self._full_text
+
+    def start(self):
+        """Start the streaming label (show cursor)."""
+        pass  # Cursor starts automatically
+
+    def stop(self):
+        """Stop the streaming label and remove cursor."""
+        if hasattr(self, '_cursor') and self._cursor:
+            try:
+                self._cursor.destroy()
+            except Exception:
+                pass
+            self._cursor = None
 
 
 # ─────────────────────────────────────────────────────────────

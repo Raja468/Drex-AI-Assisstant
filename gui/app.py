@@ -157,8 +157,11 @@ class DrexApp(ctk.CTk):
             logger.warning("No orchestrator provided to GUI")
             return
 
-        # Register our callback — called from background threads!
+        # Register our callbacks — called from background threads!
         self.orchestrator.register_response_callback(self._on_orchestrator_response)
+        self.orchestrator.register_status_callback(self._on_orchestrator_status)
+        self.orchestrator.register_stream_callback(self._on_stream_token)
+        self.orchestrator.register_voice_input_callback(self._on_voice_input)
         self.orchestrator._is_running = True
 
         logger.info("GUI connected to orchestrator")
@@ -170,6 +173,25 @@ class DrexApp(ctk.CTk):
         Never touch Tkinter widgets here.
         """
         self._response_queue.put(("response", response_text, provider))
+
+    def _on_orchestrator_status(self, status: str):
+        """Called by orchestrator for status updates."""
+        self._response_queue.put(("status", status))
+
+    def _on_stream_token(self, token: str):
+        """
+        Called by orchestrator for each streaming token.
+        Thread-safe: queues the token for main-thread delivery.
+        """
+        self._response_queue.put(("stream_token", token))
+
+    def _on_voice_input(self, text: str):
+        """
+        Called by orchestrator (background thread) when voice input is transcribed.
+        Thread-safe: queues the text for main-thread display.
+        This ensures the user's spoken message appears in the chat before the response.
+        """
+        self._response_queue.put(("voice_input", text))
 
     def _start_queue_polling(self):
         """
@@ -192,6 +214,14 @@ class DrexApp(ctk.CTk):
                     _, status_state = item
                     self._set_status(status_state)
 
+                elif item[0] == "stream_token":
+                    _, token = item
+                    self._handle_stream_token(token)
+
+                elif item[0] == "voice_input":
+                    _, text = item
+                    self._handle_voice_input(text)
+
                 elif item[0] == "toast":
                     _, msg, kind = item
                     Toast(self, msg, kind=kind)
@@ -204,6 +234,41 @@ class DrexApp(ctk.CTk):
         # Schedule next poll
         self.after(50, self._poll_queue)
 
+    def _handle_voice_input(self, text: str):
+        """
+        Handle voice input on the main thread.
+        
+        Called when the orchestrator's voice pipeline transcribes speech.
+        This method:
+          1. Displays the user's spoken message in the chat
+          2. Shows the streaming label for the upcoming response
+          3. Sets the processing state
+        """
+        if not text or not text.strip():
+            return
+        
+        logger.info(f"Voice input: '{text}'")
+        
+        # 1. Display user's spoken message in chat
+        self.chat_panel.add_message("user", text)
+        
+        # 2. Show streaming label for the upcoming response
+        self.chat_panel.show_streaming()
+        
+        # 3. Update processing state
+        self._is_processing = True
+        self._set_status(Status.PROCESSING)
+        self.input_bar.set_processing(True)
+
+    def _handle_stream_token(self, token: str):
+        """Handle a streaming token — show live rendering."""
+        if token == "__DREX_STREAM_START__":
+            self.chat_panel.show_streaming()
+        elif token == "__DREX_STREAM_END__":
+            self.chat_panel.finish_streaming()
+        else:
+            self.chat_panel.update_streaming(token)
+
     # ──────────────────────────────────────────────────────────
     #  USER INPUT HANDLING
     # ──────────────────────────────────────────────────────────
@@ -213,8 +278,13 @@ class DrexApp(ctk.CTk):
         Called when user submits text (Enter or send button).
         Runs on main thread.
         """
-        if not text.strip() or self._is_processing:
+        if not text.strip():
             return
+
+        if self._is_processing and self.orchestrator:
+            self.orchestrator.cancel_pending_generation()
+            if self.chat_panel._streaming_label:
+                self.chat_panel.finish_streaming()
 
         self._is_processing = True
         logger.info(f"GUI input: '{text}'")
@@ -222,15 +292,14 @@ class DrexApp(ctk.CTk):
         # 1. Display user message immediately
         self.chat_panel.add_message("user", text)
 
-        # 2. Show typing indicator
-        self.chat_panel.show_typing()
+        # 2. Show streaming label (orchestrator may also send START sentinel)
+        self.chat_panel.show_streaming()
 
         # 3. Update status
         self._set_status(Status.PROCESSING)
         self.input_bar.set_processing(True)
 
         # 4. Send to orchestrator in background thread
-        # (AI calls can take 1-5 seconds — must not block GUI)
         def process_in_background():
             if self.orchestrator:
                 self.orchestrator.process(text, voice_response=False)
@@ -251,13 +320,37 @@ class DrexApp(ctk.CTk):
         """
         Display Drex's response in the chat.
         Always called on the main thread via queue polling.
-        """
-        # Remove typing indicator
-        self.chat_panel.hide_typing()
 
-        # Add AI response message
-        if response_text:
-            self.chat_panel.add_message("assistant", response_text)
+        DEDUP LOGIC — prevents duplicate response bubbles:
+
+        There are two paths that can create an assistant bubble:
+          1. finish_streaming() — converts the streaming label into a bubble
+          2. add_message("assistant", ...) — adds a standalone bubble
+
+        We must ensure EXACTLY ONE bubble per response. The flag
+        _streaming_bubble_created tracks whether path 1 already fired
+        (either from __DREX_STREAM_END__ or from our finish_streaming call).
+
+        Scenarios:
+          A) Streaming active + has text → finish_streaming creates bubble → skip add_message
+          B) Streaming active + no text  → finish_streaming destroys label → add_message fallback
+          C) Streaming already finalized by __DREX_STREAM_END__ → _streaming_bubble_created=True → skip
+          D) No streaming at all → add_message with response_text
+        """
+        # Step 1: Finalize streaming if still active
+        if self.chat_panel._streaming_label:
+            self.chat_panel.finish_streaming(provider or "")
+
+        # Step 2: Decide whether to add a fallback message bubble
+        # _streaming_bubble_created is True if finish_streaming() already
+        # created a bubble (either just now, or earlier via __DREX_STREAM_END__)
+        if self.chat_panel._streaming_bubble_created:
+            # A bubble was already created by finish_streaming — do NOT duplicate
+            logger.debug("Streaming bubble already exists — skipping fallback")
+        elif response_text:
+            # No bubble was created — show the full response as a message bubble
+            self.chat_panel.hide_typing()
+            self.chat_panel.add_message("assistant", response_text, provider or "")
 
         # Update status and re-enable input
         self._set_status(Status.IDLE)

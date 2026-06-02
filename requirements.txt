@@ -1,41 +1,52 @@
-# Web framework (Vercel deployment)
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-python-multipart==0.0.20
+# ============================================================
+#  DREX - AI Desktop Assistant
+#  requirements.txt
+#
+#  INSTALL:
+#    pip install -r requirements.txt
+#
+#  For development (optional extras):
+#    pip install -r requirements.txt webrtcvad pvporcupine
+# ============================================================
 
-# Logging
-loguru==0.7.3
+# ── Core Runtime ──────────────────────────────────────────────
+customtkinter>=5.2.2
+Pillow>=10.0.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+loguru>=0.7.2
 
-# Core AI & ML dependencies
-annotated-types==0.7.0
-anyio==4.13.0
-attrs==26.1.0
-certifi==2026.4.22
-charset-normalizer==3.4.7
-distro==1.9.0
-google-auth==2.52.0
-google-genai==2.2.0
-groq==1.2.0
-httpx==0.28.1
-httpcore==1.0.9
-idna==3.15
-jiter==0.14.0
-openai==2.36.0
-packaging==26.2
-pillow==12.2.0
-propcache==0.5.2
-psutil==7.2.2
-pyasn1==0.6.3
-pyasn1_modules==0.4.2
-pydantic==2.13.4
-pydantic_core==2.46.4
-pyperclip==1.11.0
-python-dotenv==1.2.2
-requests==2.34.0
-sniffio==1.3.1
-tabulate==0.10.0
-tenacity==9.1.4
-tqdm==4.67.3
-typing-inspection==0.4.2
-typing_extensions==4.15.0
-urllib3==2.7.0
+# ── AI Provider SDKs ─────────────────────────────────────────
+google-genai>=1.0.0
+groq>=1.0.0
+openai>=1.0.0             # Required by OpenRouter + Cerebras
+
+# ── Voice & Audio ────────────────────────────────────────────
+SpeechRecognition>=3.10.0
+pyaudio>=0.2.11
+pyttsx3>=2.90             # Offline TTS
+edge-tts>=6.0.0           # Neural online TTS (optional, recommended)
+pygame>=2.5.0             # Audio playback for edge-tts (replaces broken playsound)
+
+# ── Web/API (Vercel deployment) ──────────────────────────────
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
+
+# ── Utilities ────────────────────────────────────────────────
+psutil>=5.9.0
+pyperclip>=1.8.0
+tabulate>=0.9.0
+tqdm>=4.66.0
+
+# ── Optional: Wake Word Detection ────────────────────────────
+# pvporcupine>=3.0.0      # Preferred (low CPU)
+# openwakeword>=0.4.0     # Fallback
+
+# ── Optional: Voice Activity Detection ───────────────────────
+# webrtcvad>=2.0.10       # For VAD support
+
+# ── Optional: Document Extraction ────────────────────────────
+# pytesseract>=0.3.10     # OCR
+# pymupdf>=1.24.0         # PDF extraction
+# pdfplumber>=0.11.0      # PDF parsing (alternative)

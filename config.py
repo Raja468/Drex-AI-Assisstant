@@ -2,19 +2,40 @@ import os
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 
 @dataclass
 class VoiceConfig:
+    # ── pyttsx3 (offline) settings ──────────────────────────
     rate: int = int(os.getenv("DREX_VOICE_RATE", "175"))
     volume: float = float(os.getenv("DREX_VOICE_VOLUME", "0.9"))
     voice_index: int = int(os.getenv("DREX_VOICE_INDEX", "0"))
     language: str = os.getenv("DREX_VOICE_LANG", "en-US")
+
+    # ── Speech recognition ──────────────────────────────────
     energy_threshold: int = int(os.getenv("DREX_ENERGY_THRESHOLD", "300"))
     pause_threshold: float = float(os.getenv("DREX_PAUSE_THRESHOLD", "0.8"))
     timeout: int = int(os.getenv("DREX_LISTEN_TIMEOUT", "5"))
     phrase_limit: int = int(os.getenv("DREX_PHRASE_LIMIT", "15"))
+
+    # ── TTS engine selection ────────────────────────────────
+    tts_engine: str = os.getenv("TTS_ENGINE", "pyttsx3").lower().strip()
+
+    # ── Edge-TTS (online) settings ──────────────────────────
+    edge_voice: str = os.getenv("EDGE_VOICE", "en-US-AriaNeural")
+    edge_rate: str = os.getenv("EDGE_RATE", "+0%")
+    edge_volume: str = os.getenv("EDGE_VOLUME", "+0%")
+
+    # ── Voice Activity Detection (VAD) ──────────────────────
+    vad_enabled: bool = os.getenv("DREX_VAD_ENABLED", "true").lower() == "true"
+    vad_mode: int = int(os.getenv("DREX_VAD_MODE", "1"))  # 0=most aggressive, 3=least
+    vad_silence_duration: float = float(os.getenv("DREX_VAD_SILENCE_DURATION", "0.8"))
+
+    # ── Continuous listening stability ──────────────────────
+    listen_retry_delay: float = float(os.getenv("DREX_LISTEN_RETRY_DELAY", "1.0"))
+    listen_max_restarts: int = int(os.getenv("DREX_LISTEN_MAX_RESTARTS", "10"))
+    listen_recovery_cooldown: float = float(os.getenv("DREX_LISTEN_RECOVERY_COOLDOWN", "0.5"))
 
 
 @dataclass
@@ -25,7 +46,7 @@ class AIConfig:
     gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
     # Groq
     groq_api_key: str = os.getenv("GROQ_API_KEY", "")
-    groq_model: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    groq_model: str = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
     # OpenRouter
     openrouter_api_key: str = os.getenv("OPENROUTER_API_KEY", "")
     openrouter_model: str = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
@@ -47,14 +68,15 @@ class AppConfig:
     log_file: str = os.getenv("DREX_LOG_FILE", "logs/drex.log")
     db_path: str = os.getenv("DREX_DB_PATH", "data/drex_memory.db")
     wake_word: str = os.getenv("DREX_WAKE_WORD", "hey drex")
-    wake_word_enabled: bool = os.getenv("DREX_WAKE_WORD_ENABLED", "false").lower() == "true"
+    wake_word_enabled: bool = os.getenv("DREX_WAKE_WORD_ENABLED", "true").lower() == "true"
     gui_enabled: bool = os.getenv("DREX_GUI_ENABLED", "true").lower() == "true"
     voice_enabled: bool = os.getenv("DREX_VOICE_ENABLED", "true").lower() == "true"
     theme: str = os.getenv("DREX_THEME", "dark")
     window_width: int = int(os.getenv("DREX_WIN_WIDTH", "1100"))
     window_height: int = int(os.getenv("DREX_WIN_HEIGHT", "700"))
-    # Personality mode: jarvis | friendly | hacker | calm
     personality: str = os.getenv("DREX_PERSONALITY", "jarvis")
+    # Wake word sensitivity (0.0 to 1.0, lower = more sensitive)
+    wake_word_sensitivity: float = float(os.getenv("DREX_WAKE_SENSITIVITY", "0.5"))
 
 
 @dataclass

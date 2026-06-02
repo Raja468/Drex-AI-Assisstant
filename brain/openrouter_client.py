@@ -1,55 +1,45 @@
-# ============================================================
-#  DREX - AI Desktop Assistant
-#  brain/openrouter_client.py  —  OpenRouter API Client
-#
-#  WHAT IS OPENROUTER:
-#  A single API that gives access to 100+ AI models,
-#  including many completely FREE models.
-#
-#  FREE MODELS AVAILABLE:
-#  - meta-llama/llama-3.1-8b-instruct:free
-#  - mistralai/mistral-7b-instruct:free
-#  - google/gemma-2-9b-it:free
-#  - microsoft/phi-3-mini-128k-instruct:free
-#
-#  Get key at: https://openrouter.ai
-# ============================================================
+"""
+brain/openrouter_client.py — OpenRouter API Client for DREX
+
+Provides access to 100+ AI models through a single API.
+Supports both synchronous chat and streaming responses.
+
+FREE MODELS AVAILABLE:
+  - meta-llama/llama-3.1-8b-instruct:free
+  - mistralai/mistral-7b-instruct:free
+  - google/gemma-2-9b-it:free
+  - microsoft/phi-3-mini-128k-instruct:free
+
+Get key at: https://openrouter.ai
+"""
 
 import requests
 import json
 import time
-from typing import Optional
+from typing import Callable, Generator, Optional
 from utils.logger import logger
 from utils.error_handler import AIError
+from brain.base_client import BaseAIClient, StreamCallback
 
 try:
     from config import get_config
-    try:
-        from config import AIModels
-    except ImportError:
-        AIModels = None
     cfg = get_config()
     OPENROUTER_API_KEY = cfg.ai.openrouter_api_key
 except ImportError:
     OPENROUTER_API_KEY = ""
-    AIModels = None
     cfg = None
     class AIConfig:
         MAX_TOKENS  = 1024
         TEMPERATURE = 0.7
-
-if AIModels is None:
-    class AIModels:
-        OPENROUTER_MISTRAL = "mistralai/mistral-7b-instruct:free"
-        OPENROUTER_LLAMA   = "meta-llama/llama-3.1-8b-instruct:free"
-        OPENROUTER_GEMMA   = "google/gemma-2-9b-it:free"
+        OPENROUTER_MODEL = "openai/gpt-4o-mini"
 
 OPENROUTER_BASE_URL = "https://api.openrouter.ai/v1/chat/completions"
 
 
-class OpenRouterClient:
+class OpenRouterClient(BaseAIClient):
     """
-    Wrapper for the OpenRouter API.
+    Wrapper for the OpenRouter API with streaming support.
+
     Provides access to many free AI models through a single interface.
     """
 
@@ -76,6 +66,14 @@ class OpenRouterClient:
     def is_available(self) -> bool:
         return self._available
 
+    def generate(self, prompt: str, context: dict = None) -> str:
+        """Legacy text prompt interface — delegates to chat()."""
+        result = self.chat(
+            messages=[{"role": "user", "content": prompt}],
+            system_prompt=(context or {}).get("system", ""),
+        )
+        return result or ""
+
     def chat(
         self,
         messages: list[dict],
@@ -85,7 +83,7 @@ class OpenRouterClient:
         max_tokens: int = None,
     ) -> Optional[str]:
         """
-        Send a conversation to OpenRouter and get a response.
+        Send a conversation to OpenRouter and get a full response.
 
         Args:
             messages:      List of {"role": "user"/"assistant", "content": "..."}
@@ -100,11 +98,10 @@ class OpenRouterClient:
         if not self._available:
             return None
 
-        model   = model       or AIModels.OPENROUTER_MISTRAL
+        model   = model       or (cfg.ai.openrouter_model if cfg else AIConfig.OPENROUTER_MODEL)
         temp    = temperature or (cfg.ai.temperature if cfg else AIConfig.TEMPERATURE)
         max_tok = max_tokens  or (cfg.ai.max_tokens if cfg else AIConfig.MAX_TOKENS)
 
-        # Build full messages list with system prompt
         full_messages = []
         if system_prompt:
             full_messages.append({"role": "system", "content": system_prompt})
@@ -115,9 +112,9 @@ class OpenRouterClient:
             "messages":    full_messages,
             "temperature": temp,
             "max_tokens":  max_tok,
+            "stream":      False,
         }
 
-        # Retry with backoff for transient failures (DNS, connection, timeouts)
         max_retries = 2
         last_error = None
         for attempt in range(max_retries):
@@ -141,7 +138,9 @@ class OpenRouterClient:
                 data = response.json()
 
                 text = data["choices"][0]["message"]["content"].strip()
-                logger.info(f"✅ OpenRouter [{model}] responded ({len(text)} chars)")
+                logger.info(
+                    "✅ OpenRouter [{}] responded ({} chars)", model, len(text)
+                )
                 return text
 
             except AIError:
@@ -153,7 +152,7 @@ class OpenRouterClient:
                 )
                 last_error = AIError("CONNECTION_ERROR")
                 if attempt < max_retries - 1:
-                    time.sleep(1.0 * (attempt + 1))  # linear backoff
+                    time.sleep(1.0 * (attempt + 1))
                     continue
             except requests.Timeout as e:
                 logger.warning(
@@ -168,23 +167,116 @@ class OpenRouterClient:
                 logger.error(f"OpenRouter chat failed: {e}")
                 return None
 
-        # All retries exhausted
         if isinstance(last_error, AIError):
             raise last_error
         return None
+
+    def stream_chat(
+        self,
+        messages: list[dict],
+        system_prompt: str = "",
+        on_token: StreamCallback = None,
+        on_complete: StreamCallback = None,
+        model: str = None,
+        temperature: float = None,
+        max_tokens: int = None,
+    ) -> Generator[str, None, None]:
+        """
+        Stream a chat response token-by-token from OpenRouter.
+
+        Uses OpenAI-compatible SSE streaming.
+        Yields tokens as they arrive.
+
+        Args:
+            messages: Chat messages.
+            system_prompt: System instruction.
+            on_token: Called with each partial token.
+            on_complete: Called with the full assembled response.
+            model: Override model name.
+            temperature: Creativity 0.0-1.0.
+            max_tokens: Max response length.
+
+        Yields:
+            Partial response tokens.
+        """
+        if not self._available:
+            return
+
+        model   = model       or (cfg.ai.openrouter_model if cfg else AIConfig.OPENROUTER_MODEL)
+        temp    = temperature or (cfg.ai.temperature if cfg else AIConfig.TEMPERATURE)
+        max_tok = max_tokens  or (cfg.ai.max_tokens if cfg else AIConfig.MAX_TOKENS)
+
+        full_messages = []
+        if system_prompt:
+            full_messages.append({"role": "system", "content": system_prompt})
+        full_messages.extend(messages)
+
+        payload = {
+            "model":       model,
+            "messages":    full_messages,
+            "temperature": temp,
+            "max_tokens":  max_tok,
+            "stream":      True,
+        }
+
+        try:
+            with requests.post(
+                OPENROUTER_BASE_URL,
+                headers=self._headers,
+                json=payload,
+                stream=True,
+                timeout=60,
+            ) as response:
+
+                if response.status_code == 429:
+                    raise AIError("RATE_LIMIT")
+                if response.status_code in (401, 403):
+                    raise AIError("AUTH_ERROR")
+                response.raise_for_status()
+
+                full_response = []
+                for line in response.iter_lines(decode_unicode=True):
+                    if not line:
+                        continue
+                    if line.startswith("data: "):
+                        data_str = line[6:]
+                        if data_str.strip() == "[DONE]":
+                            break
+                        try:
+                            data = json.loads(data_str)
+                            delta = data.get("choices", [{}])[0].get("delta", {})
+                            token = delta.get("content", "")
+                            if token:
+                                full_response.append(token)
+                                if on_token:
+                                    on_token(token)
+                                yield token
+                        except json.JSONDecodeError:
+                            continue
+
+                assembled = "".join(full_response)
+                if on_complete:
+                    on_complete(assembled)
+                logger.info(
+                    "✅ OpenRouter stream [{}] complete ({} chars)",
+                    model, len(assembled),
+                )
+
+        except AIError:
+            raise
+        except Exception as e:
+            logger.error(f"OpenRouter stream failed: {e}")
+            raise
 
     def quick_ask(self, question: str, system: str = "") -> Optional[str]:
         """Fast one-shot question using a small free model."""
         return self.chat(
             [{"role": "user", "content": question}],
             system_prompt=system,
-            model=AIModels.OPENROUTER_MISTRAL,
+            model=(cfg.ai.openrouter_model if cfg else AIConfig.OPENROUTER_MODEL),
         )
 
 
-# ─────────────────────────────────────────────────────────────
-#  QUICK TEST
-# ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     from utils.logger import setup_logger
     setup_logger()

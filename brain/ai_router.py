@@ -18,6 +18,7 @@ import re
 import time
 from typing import Optional
 from utils.logger import logger
+from brain.base_client import StreamCallback
 from utils.error_handler import AIError
 from brain.gemini_client import GeminiClient
 from brain.groq_client import GroqClient
@@ -26,19 +27,13 @@ from brain.cerebras_client import CerebrasClient
 from brain.prompt_builder import PromptBuilder
 
 try:
-    from config import AIConfig, AIModels
+    from config import AIConfig
 except ImportError:
     class AIConfig:
         CONTEXT_WINDOW = 10
         MAX_TOKENS = 1024
         TEMPERATURE = 0.7
         FALLBACK_CHAIN = ["gemini", "groq", "openrouter", "cerebras"]
-
-    class AIModels:
-        GROQ_LLAMA_FAST = "llama-3.1-8b-instant"
-        GROQ_LLAMA_SMART = "llama-3.3-70b-versatile"
-        GEMINI_FLASH = "gemini-2.0-flash"
-        CEREBRAS_LLAMA = "llama3.3-70b"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -232,6 +227,85 @@ class AIRouter:
             "none",
         )
 
+    def generate_stream(
+        self,
+        messages: list[dict],
+        system_prompt: str,
+        user_input: str,
+        on_token: StreamCallback = None,
+        intent=None,
+        force_provider: Optional[str] = None,
+    ) -> tuple[str, str]:
+        """
+        Stream tokens via on_token while assembling the full response.
+        Uses the same routing and fallback logic as generate().
+        """
+        if not any(self._api_health.values()):
+            return (
+                "I don't have any AI APIs configured yet. "
+                "Please add your API keys to the .env file.",
+                "none",
+            )
+
+        task_type = self._classify_task(user_input, intent)
+        logger.info("🎯 Task classified as: '{}' (streaming)", task_type)
+
+        if force_provider and self._api_health.get(force_provider):
+            provider_order = [force_provider] + [
+                p for p in self._get_provider_order(task_type)
+                if p != force_provider
+            ]
+        else:
+            provider_order = self._get_provider_order(task_type)
+
+        for provider in provider_order:
+            logger.info("🤖 Streaming via provider: {}", provider)
+            try:
+                response = self._stream_provider(
+                    provider=provider,
+                    messages=messages,
+                    system=system_prompt,
+                    on_token=on_token,
+                )
+                if response:
+                    return response, provider
+
+            except AIError as e:
+                if not self._handle_stream_error(provider, e):
+                    continue
+
+            except Exception as e:
+                logger.error("Unexpected stream error with {}: {}", provider, e)
+                continue
+
+        logger.error("All AI providers failed (streaming)!")
+        return (
+            "I'm having trouble reaching my AI services right now. "
+            "Please check your internet connection and API keys.",
+            "none",
+        )
+
+    def _handle_stream_error(self, provider: str, e: AIError) -> bool:
+        """Apply fallback policy for streaming errors. Returns True if fatal to chain."""
+        error_code = str(e)
+        if "RATE_LIMIT" in error_code:
+            logger.warning("⏱️ {} rate limited. Trying next...", provider)
+            time.sleep(0.5)
+            return False
+        if "AUTH_ERROR" in error_code:
+            logger.error("🔑 {} auth failed. Skipping...", provider)
+            self._api_health[provider] = False
+            return False
+        if "CONNECTION_ERROR" in error_code or "TIMEOUT_ERROR" in error_code:
+            logger.warning("🌐 {} network issue ({}). Trying next...", provider, error_code)
+            time.sleep(1.0)
+            return False
+        if "MODEL_NOT_FOUND" in error_code:
+            logger.error("🔥 {} model config error. Skipping...", provider)
+            return False
+        logger.error("❌ {} stream error: {}", provider, e)
+        return False
+
     # ──────────────────────────────────────────────────────────
     #  TASK CLASSIFIER
     # ──────────────────────────────────────────────────────────
@@ -324,6 +398,14 @@ class AIRouter:
         logger.error("All AI providers failed!")
         return None
 
+    def _get_client(self, provider: str):
+        return {
+            "gemini": self.gemini,
+            "groq": self.groq,
+            "openrouter": self.openrouter,
+            "cerebras": self.cerebras,
+        }.get(provider)
+
     def _call_provider(
         self,
         provider: str,
@@ -331,33 +413,38 @@ class AIRouter:
         system: str,
         task_type: str
     ) -> Optional[str]:
-        if provider == "gemini":
-            return self.gemini.chat(
-                messages=messages,
-                system_prompt=system,
-            )
-        elif provider == "groq":
-            model = (
-                "llama-3.3-70b-versatile"
-                if task_type == "reasoning"
-                else "llama-3.1-8b-instant"
-            )
-            return self.groq.chat(
-                messages=messages,
-                system_prompt=system,
-                model=model,
-            )
-        elif provider == "openrouter":
-            return self.openrouter.chat(
-                messages=messages,
-                system_prompt=system,
-            )
-        elif provider == "cerebras":
-            return self.cerebras.chat(
-                messages=messages,
-                system_prompt=system,
-            )
-        return None
+        client = self._get_client(provider)
+        if not client:
+            return None
+        return client.chat(messages=messages, system_prompt=system)
+
+    def _stream_provider(
+        self,
+        provider: str,
+        messages: list[dict],
+        system: str,
+        on_token: StreamCallback = None,
+    ) -> Optional[str]:
+        client = self._get_client(provider)
+        if not client or not client.is_available:
+            return None
+
+        parts: list[str] = []
+
+        def _token_cb(token: str):
+            parts.append(token)
+            if on_token:
+                on_token(token)
+
+        for _token in client.stream_chat(
+            messages=messages,
+            system_prompt=system,
+            on_token=_token_cb,
+        ):
+            pass
+
+        assembled = "".join(parts)
+        return assembled if assembled else None
 
     # ──────────────────────────────────────────────────────────
     #  STATUS & UTILITIES

@@ -17,7 +17,7 @@ import customtkinter as ctk
 from datetime import datetime
 from typing import Optional
 from gui.theme import Colors, Fonts, Sizing, Spacing
-from gui.widgets import MessageBubble, TypingIndicator
+from gui.widgets import MessageBubble, TypingIndicator, StreamingLabel
 from utils.logger import logger
 
 
@@ -37,7 +37,9 @@ class ChatPanel(ctk.CTkFrame):
 
         self._message_count = 0
         self._typing_indicator: Optional[TypingIndicator] = None
+        self._streaming_label: Optional[StreamingLabel] = None
         self._is_typing = False
+        self._streaming_bubble_created = False  # Tracks if finish_streaming() already made a bubble
 
         self._build()
         self._show_welcome()
@@ -164,13 +166,14 @@ class ChatPanel(ctk.CTkFrame):
 
     # ── Public API ────────────────────────────────────────────
 
-    def add_message(self, role: str, content: str):
+    def add_message(self, role: str, content: str, provider: str = ""):
         """
         Add a new message bubble to the chat.
 
         Args:
             role:    "user" | "assistant"
             content: Message text
+            provider: Provider name metadata (for AI messages)
         """
         # Remove welcome screen on first message
         if self._message_count == 0:
@@ -188,6 +191,7 @@ class ChatPanel(ctk.CTkFrame):
             role=role,
             content=content,
             timestamp=timestamp,
+            provider=provider if provider else None,
         )
         bubble.pack(fill="x", pady=(4, 4))
 
@@ -214,6 +218,89 @@ class ChatPanel(ctk.CTkFrame):
             self._typing_indicator.stop()
             self._typing_indicator.destroy()
             self._typing_indicator = None
+        self._is_typing = False
+
+    # ── Streaming support ────────────────────────────────────
+
+    def show_streaming(self, provider: str = "") -> None:
+        """
+        Show a streaming label for realtime token rendering.
+        Safe to call multiple times — won't create duplicate labels.
+
+        Args:
+            provider: Optional provider name to display.
+        """
+        # Prevent duplicate streaming labels
+        if self._streaming_label and self._streaming_label.winfo_exists():
+            logger.debug("Streaming label already exists — skipping duplicate")
+            return
+
+        self._hide_welcome()
+        if self._is_typing:
+            self.hide_typing()
+
+        self._streaming_label = StreamingLabel(
+            self.messages_container,
+            provider=provider,
+        )
+        self._streaming_label.pack(fill="x", pady=(4, 4))
+        self._streaming_label.start()
+        self._is_typing = True  # reuse flag to prevent double streams
+        self._streaming_bubble_created = False  # Reset for new response cycle
+        self.after(50, self._scroll_to_bottom)
+        logger.debug("Streaming label created")
+
+    def update_streaming(self, token: str) -> None:
+        """
+        Append a token to the current streaming message.
+        Thread-safe — uses after() to schedule on main thread.
+
+        Args:
+            token: A partial response token to append.
+        """
+        if self._streaming_label:
+            self._streaming_label.append(token)
+            # Scroll to bottom periodically during streaming
+            self.after(10, self._scroll_to_bottom)
+
+    def finish_streaming(self, provider: str = "") -> None:
+        """
+        Finalize the streaming message into a permanent message bubble.
+        Called when streaming is complete.
+
+        Only creates a message bubble if streamed text is non-empty.
+        If empty (e.g. provider fallback without tokens), the streaming
+        label is destroyed silently — _display_response handles the fallback.
+
+        Args:
+            provider: Provider name to show in the message meta.
+        """
+        if self._streaming_label:
+            full_text = self._streaming_label.get_text()
+            self._streaming_label.stop()
+            self._streaming_label.destroy()
+            self._streaming_label = None
+
+            # Only create a bubble if there's actual streamed content
+            if full_text.strip():
+                self._message_count += 1
+                timestamp = datetime.now().strftime("%I:%M %p")
+                provider_label = f"via {provider}" if provider else ""
+
+                bubble = MessageBubble(
+                    self.messages_container,
+                    role="assistant",
+                    content=full_text,
+                    timestamp=timestamp,
+                    provider=provider_label,
+                )
+                bubble.pack(fill="x", pady=(4, 4))
+                self.after(50, self._scroll_to_bottom)
+                self._streaming_bubble_created = True  # Mark bubble as created
+                logger.debug("Streaming bubble created (len={})", len(full_text))
+            else:
+                logger.debug("Streaming label had no text — no bubble created")
+
         self._is_typing = False
 
     def clear_messages(self):

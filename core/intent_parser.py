@@ -19,10 +19,10 @@ class Intent:
 
 
 INTENT_PATTERNS = {
-    "open_app": [
-        (r"(?:open|launch|start|run)\s+(.+)", "open"),
-        (r"(?:start up|fire up)\s+(.+)", "open"),
-    ],
+ "open_app": [
+    (r"(?:open|launch|start|run)\s+(?:the\s+)?(.+?)(?:\s+for\s+me|\s+please|$)", "open"),
+    (r"(?:start up|fire up)\s+(.+)", "open"),
+],
     "close_app": [
         (r"(?:close|quit|exit|kill)\s+(.+)", "close"),
         (r"(?:shut down|stop)\s+(.+)", "close"),
