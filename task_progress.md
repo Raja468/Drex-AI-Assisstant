@@ -1,56 +1,42 @@
-# DREX Phase 3 — Full Production Hardening
+# DREX Performance Sprint - Task Progress
 
-## Audit Findings (Pre-Fix)
-- [x] .env has CEREBRAS_MODEL=llama3.3-70b (needs fix)
-- [x] ai_router.py line 41 has CEREBRAS_LLAMA = "llama3.3-70b"
-- [x] task_dispatcher.py duplicates orchestrator dispatch logic
-- [x] db_manager.py uses unsafe check_same_thread=False
-- [x] VAD exists but cfg.voice.vad_enabled defaults to False
-- [x] Providers lack stream_chat() (except Cerebras)
-- [x] Memory modules are stubs
+## Task 1: Remove blocking startup operations ✓
+- [ ] 1a. Lazy-load ScreenCapture/VisionAnalyzer in Orchestrator.__init__
+- [ ] 1b. Defer DB session start to first use
+- [ ] 1c. Move _setup_logging to lazy init
+- [ ] 1d. Reduce main.py startup imports to minimum
 
-## Priority 1 — Realtime Voice System (enable VAD, fix lifecycle)
-- [ ] Fix VAD default: enable by default, proper wiring
-- [ ] Add detailed voice lifecycle logging to listener
-- [ ] Ensure microphone reconnect after failures
-- [ ] Ensure daemon-safe thread management
+## Task 2: Pause Jarvis Orb animation ✓
+- [ ] 2a. Add window minimize/unminimize detection in DrexApp
+- [ ] 2b. Add idle timeout pause (5s of idle → stop animation)
+- [ ] 2c. Auto-resume animation on state change or window restore
 
-## Priority 2 — Streaming AI Responses (all providers)
-- [x] Add stream_chat() to GroqClient
-- [x] Add stream_chat() to GeminiClient
-- [x] Add stream_chat() to OpenRouterClient
-- [x] Ensure orchestrator uses streaming path (generate_stream + GUI tokens)
+## Task 3: Replace polling with event-driven ✓
+- [ ] 3a. Increase _poll_queue interval from 50ms → 100ms
+- [ ] 3b. Optimize AwarenessEngine snapshot loop (event-driven refresh on window change)
 
-## Priority 3 — Cerebras Model Fix (all references)
-- [ ] Fix .env CEREBRAS_MODEL default
-- [ ] Fix ai_router.py CEREBRAS_LLAMA reference
-- [ ] Fix docs/PROJECT_REPORT.md references
+## Task 4: EventBus audit ✓
+- [ ] 4a. Find unused events
+- [ ] 4b. Find missing subscribers
+- [ ] 4c. Find duplicate publishers
+- [ ] 4d. Find dead connections
+- [ ] 4e. Find race conditions
 
-## Priority 4 — SQLite Threading Fix
-- [ ] Rewrite db_manager.py with WAL mode + thread-safe connection pool
+## Task 5: Thread safety audit ✓
+- [ ] 5a. Audit every CTk update path
+- [ ] 5b. Fix any direct background-thread UI calls
 
-## Priority 5 — Remove Duplicate Architecture
-- [ ] Consolidate task_dispatcher.py into orchestrator dispatch
-- [ ] Remove duplicate fallback logic in ai_router.py
+## Task 6: Startup loading state ✓
+- [ ] 6a. Add loading overlay to DrexApp
+- [ ] 6b. Show if initialization >500ms
+- [ ] 6c. Auto-hide when ready
 
-## Priority 6 — Smart Memory Foundation
-- [ ] Implement memory/context_builder.py
-- [ ] Implement memory/conversation_store.py
-- [ ] Implement memory/user_preferences.py
+## Task 7: Voice latency logging ✓
+- [ ] 7a. Add STT latency measurement
+- [ ] 7b. Add AI routing latency measurement  
+- [ ] 7c. Add TTS latency measurement
+- [ ] 7d. Display in logs
 
-## Priority 7 — Tool Execution Intelligence
-- [ ] Add timeout handling to automation
-- [ ] Add confirmation system for dangerous ops
-- [ ] Add operation tracking
-
-## Priority 8 — Document Understanding
-- [ ] Wire document_extractor into automation commands
-
-## Priority 9 — Production Hardening
-- [ ] Add retry logic throughout
-- [ ] Add thread pool management
-- [ ] Add resource cleanup
-
-## Priority 10 — Launch Readiness
-- [ ] Improve startup diagnostics
-- [ ] Add dependency health checks
+## Final validation
+- [ ] Run `python main.py --test`
+- [ ] Verify all changes work together

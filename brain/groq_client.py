@@ -10,7 +10,8 @@ FREE TIER LIMITS (as of 2024):
   - Get key at: https://console.groq.com
 """
 
-from typing import Callable, Generator, Optional
+import asyncio
+from typing import AsyncGenerator, Callable, Generator, Optional
 from utils.logger import logger
 from utils.error_handler import AIError
 from brain.base_client import BaseAIClient, StreamCallback
@@ -214,6 +215,27 @@ class GroqClient(BaseAIClient):
             system_prompt=system,
             model=(cfg.ai.groq_model if cfg else AIConfig.GROQ_MODEL_FAST),
         )
+
+    async def stream_response(self, prompt: str, context: list = None) -> AsyncGenerator[str, None]:
+        """
+        Async generator that yields text chunks as they arrive from Groq.
+        
+        Args:
+            prompt: The user prompt.
+            context: Optional list of context messages.
+            
+        Yields:
+            Text chunks as strings, never returns full string.
+        """
+        messages = [{"role": "user", "content": prompt}]
+        if context:
+            messages = context + messages
+        gen = self.stream_chat(
+            messages=messages,
+            system_prompt="",
+        )
+        for token in gen:
+            yield token
 
     def smart_ask(self, question: str, system: str = "") -> Optional[str]:
         """Use the larger, smarter Groq model."""

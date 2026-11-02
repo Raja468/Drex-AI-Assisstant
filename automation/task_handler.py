@@ -20,6 +20,7 @@ from automation.system_control import SystemControl
 from automation.browser_control import BrowserControl, QUICK_SITES
 from automation.file_manager import FileManager
 from core.intent_parser import Intent
+from core.permission import PermissionManager, ActionRisk
 
 
 class TaskHandler:
@@ -37,6 +38,7 @@ class TaskHandler:
         self.system   = SystemControl()
         self.browser  = BrowserControl()
         self.files     = FileManager()
+        self.permission = PermissionManager()
         logger.info("✅ TaskHandler initialized (all automation modules ready)")
 
     # ──────────────────────────────────────────────────────────
@@ -89,7 +91,29 @@ class TaskHandler:
         ok, msg = self.launcher.open_app(app)
         return msg
 
+    def _check_permission(self, intent: Intent) -> bool:
+        """Check if an action requires user approval. Returns True if allowed."""
+        action = intent.action
+        target = intent.target or intent.raw[:80]
+        
+        # Classify and check if approval needed
+        if self.permission.requires_approval(action, target):
+            logger.warning("⛔ Permission needed for: {} '{}'", action, target)
+            # If no GUI approval handler registered, deny by default
+            if not self.permission.on_approval_required:
+                return False
+            # Request will be handled asynchronously via callback
+            return False
+        return True
+
     def _handle_close_app(self, intent: Intent) -> str:
+        action = intent.action
+        # Request approval before closing an app
+        if self.permission.requires_approval(action, intent.target or intent.raw):
+            return (
+                f"I need your permission to close '{intent.target or intent.raw}'. "
+                f"Please confirm in the dialog."
+            )
         app = intent.target or self._extract_app_from_text(intent.raw)
         if not app:
             return "Which application should I close?"
@@ -207,26 +231,35 @@ class TaskHandler:
             return msg
 
         if sub_type == "screenshot":
+            # Screenshots can capture sensitive data — request approval
+            if self.permission.requires_approval("screenshot"):
+                return "I need your permission to take a screenshot. Please confirm in the dialog."
             ok, msg = self.system.take_screenshot()
             return msg
 
         if sub_type == "lock":
+            # Screen lock is safe, no approval needed
             ok, msg = self.system.lock_screen()
             return msg
 
         if sub_type == "sleep":
+            # Sleep can disrupt work — request approval
+            if self.permission.requires_approval("sleep"):
+                return "I need your permission to put the computer to sleep. Please confirm in the dialog."
             ok, msg = self.system.sleep()
             return msg
 
         if sub_type == "restart":
+            # Restart is a critical action — always require approval
+            if self.permission.requires_approval("restart"):
+                return "I need your permission to restart the computer. Please confirm in the dialog."
             ok, msg = self.system.restart()
             return msg
 
         if sub_type == "shutdown":
-            return (
-                "Are you sure you want to shut down? "
-                "Say 'yes confirm shutdown' to proceed."
-            )
+            # Shutdown is the most critical action — always require approval
+            if self.permission.requires_approval("shutdown"):
+                return "I need your permission to shut down the computer. Please confirm in the dialog."
 
         if sub_type == "confirm_shutdown":
             ok, msg = self.system.shutdown()

@@ -6,7 +6,8 @@
 
 import time
 import random
-from typing import Callable, Generator, Optional
+import asyncio
+from typing import AsyncGenerator, Callable, Generator, Optional
 from utils.logger import logger
 from utils.error_handler import AIError
 from brain.base_client import BaseAIClient, StreamCallback
@@ -228,6 +229,27 @@ class GeminiClient(BaseAIClient):
                 raise AIError("AUTH_ERROR")
             logger.error(f"Gemini stream failed: {e}")
             raise
+
+    async def stream_response(self, prompt: str, context: list = None) -> AsyncGenerator[str, None]:
+        """
+        Async generator that yields text chunks as they arrive from Gemini.
+        
+        Args:
+            prompt: The user prompt.
+            context: Optional list of context messages.
+            
+        Yields:
+            Text chunks as strings, never returns full string.
+        """
+        messages = [{"role": "user", "content": prompt}]
+        if context:
+            messages = context + messages
+        gen = self.stream_chat(
+            messages=messages,
+            system_prompt="",
+        )
+        for token in gen:
+            yield token
 
     def quick_ask(self, question: str, system: str = "") -> Optional[str]:
         return self.chat([{"role": "user", "content": question}], system_prompt=system)

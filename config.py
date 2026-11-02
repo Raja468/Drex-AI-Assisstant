@@ -8,14 +8,14 @@ load_dotenv(override=True)
 @dataclass
 class VoiceConfig:
     # ── pyttsx3 (offline) settings ──────────────────────────
-    rate: int = int(os.getenv("DREX_VOICE_RATE", "175"))
+    rate: int = int(os.getenv("TTS_SPEED", "175"))
     volume: float = float(os.getenv("DREX_VOICE_VOLUME", "0.9"))
     voice_index: int = int(os.getenv("DREX_VOICE_INDEX", "0"))
     language: str = os.getenv("DREX_VOICE_LANG", "en-US")
 
     # ── Speech recognition ──────────────────────────────────
-    energy_threshold: int = int(os.getenv("DREX_ENERGY_THRESHOLD", "300"))
-    pause_threshold: float = float(os.getenv("DREX_PAUSE_THRESHOLD", "0.8"))
+    energy_threshold: int = int(os.getenv("DREX_ENERGY_THRESHOLD", "200"))
+    pause_threshold: float = float(os.getenv("DREX_PAUSE_THRESHOLD", "0.6"))
     timeout: int = int(os.getenv("DREX_LISTEN_TIMEOUT", "5"))
     phrase_limit: int = int(os.getenv("DREX_PHRASE_LIMIT", "15"))
 
@@ -52,7 +52,7 @@ class AIConfig:
     openrouter_model: str = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
     # Cerebras
     cerebras_api_key: str = os.getenv("CEREBRAS_API_KEY", "")
-    cerebras_model: str = os.getenv("CEREBRAS_MODEL", "llama3.3-70b")
+    cerebras_model: str = os.getenv("CEREBRAS_MODEL", "gpt-oss-120b")
     # General
     max_tokens: int = int(os.getenv("DREX_MAX_TOKENS", "1024"))
     temperature: float = float(os.getenv("DREX_TEMPERATURE", "0.7"))
@@ -63,7 +63,7 @@ class AIConfig:
 class AppConfig:
     name: str = "DREX"
     version: str = "1.0.0"
-    debug: bool = os.getenv("DREX_DEBUG", "false").lower() == "true"
+    debug: bool = os.getenv("DREX_DEBUG_MODE", "false").lower() == "true"
     log_level: str = os.getenv("DREX_LOG_LEVEL", "INFO")
     log_file: str = os.getenv("DREX_LOG_FILE", "logs/drex.log")
     db_path: str = os.getenv("DREX_DB_PATH", "data/drex_memory.db")
@@ -95,3 +95,44 @@ def get_config() -> DrexConfig:
     if _config is None:
         _config = DrexConfig()
     return _config
+
+
+def validate_api_keys() -> dict:
+    """
+    Check each AI provider's API key and return availability status.
+
+    Logs a WARNING (not ERROR) for any missing key.
+    Never crashes the app — just marks providers as unavailable.
+
+    Returns:
+        Dict mapping provider names to boolean availability.
+    """
+    cfg = get_config()
+    ai = cfg.ai
+    from loguru import logger
+
+    providers = {
+        "gemini": ai.gemini_api_key,
+        "groq": ai.groq_api_key,
+        "openrouter": ai.openrouter_api_key,
+        "cerebras": ai.cerebras_api_key,
+    }
+
+    status = {}
+    for name, key in providers.items():
+        if key and key.strip() and "your_" not in key:
+            status[name] = True
+        else:
+            logger.warning(
+                "API key for '{}' is missing or not configured — "
+                "this provider will be disabled", name,
+            )
+            status[name] = False
+
+    available = [k for k, v in status.items() if v]
+    logger.info(
+        "API key validation complete | available: {} | count: {}/{}",
+        ", ".join(available) if available else "none",
+        len(available), len(providers),
+    )
+    return status

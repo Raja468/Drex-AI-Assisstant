@@ -234,6 +234,34 @@ class DBManager:
         ).fetchone()
         return row["cnt"]
 
+    def get_all_sessions(self) -> list[dict]:
+        conn = self._get_connection()
+        rows = conn.execute(
+            "SELECT id, started_at, ended_at, summary FROM sessions "
+            "ORDER BY started_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_session_messages(self, session_id: str,
+                              limit: int = 100) -> list[dict]:
+        conn = self._get_connection()
+        rows = conn.execute(
+            "SELECT role, content, timestamp, metadata FROM conversations "
+            "WHERE session_id=? ORDER BY timestamp ASC LIMIT ?",
+            (session_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_session_title(self, session_id: str) -> str | None:
+        conn = self._get_connection()
+        row = conn.execute(
+            "SELECT content FROM conversations "
+            "WHERE session_id=? AND role='user' "
+            "ORDER BY timestamp ASC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        return row["content"][:60] if row else None
+
     # ── Cleanup ───────────────────────────────────────────
 
     def close(self):

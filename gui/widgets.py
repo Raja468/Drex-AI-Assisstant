@@ -1,580 +1,656 @@
 # ============================================================
 #  DREX - AI Desktop Assistant
-#  gui/widgets.py  —  Reusable Custom UI Components
+#  gui/widgets.py - Reusable UI components
 #
-#  Custom widgets built on top of CustomTkinter.
-#  Every panel uses these so the UI stays consistent.
+#  DESIGN NOTE (read before adding markdown/async rendering back):
+#  This file deliberately uses simple, SYNCHRONOUS CTkLabel rendering
+#  for message content. An earlier version used a tk.Text-based
+#  MarkdownMessage widget that resized itself asynchronously over
+#  several Tk idle cycles. That created a whole class of race
+#  conditions with chat_panel.py's auto-scroll (cut-off top messages,
+#  gaps between text and action buttons) because the scroll logic
+#  could run before/after the async height was actually final, with
+#  no reliable way to know which.
 #
-#  Components:
-#  - MessageBubble   — Chat message with avatar and timestamp
-#  - StreamingLabel  — Live-updating label for realtime tokens
-#  - StatusDot       — Animated pulsing status indicator
-#  - SidebarButton   — Navigation button with icon + label
-#  - AnimatedButton  — Button with hover/press color animation
-#  - CodeBlock       — Monospace code block in chat
-#  - TypingIndicator — Animated "..." dots while AI is thinking
-#  - Toast           — Floating notification
+#  CTkLabel with wraplength computes its final size synchronously
+#  within the same layout pass, so there is no "settling" period and
+#  no race to have. If rich markdown rendering is wanted back, it
+#  should be re-added carefully, with its own explicit, testable
+#  "done resizing" signal -- not layered in silently.
 # ============================================================
 
+import re
 import tkinter as tk
 import customtkinter as ctk
 from datetime import datetime
-from gui.theme import Colors, Fonts, Sizing, Spacing, Anim
+from typing import Optional, Callable
+
+from gui.theme import Colors, Fonts, Sizing, Spacing, Icons
+from utils.logger import logger
 
 
-# ─────────────────────────────────────────────────────────────
+# =============================================================
+#  INTERACTION HELPERS
+# =============================================================
+
+def add_press_feedback(button: ctk.CTkButton, base_color: str, press_color: str):
+    """Give a CTkButton a subtle 'pressed' color dip."""
+    def _press(_e=None):
+        try:
+            button.configure(fg_color=press_color)
+        except Exception:
+            pass
+
+    def _release(_e=None):
+        try:
+            button.configure(fg_color=base_color)
+        except Exception:
+            pass
+
+    button.bind("<ButtonPress-1>", _press, add="+")
+    button.bind("<ButtonRelease-1>", _release, add="+")
+    return button
+
+
+def _mini_action_button(parent, glyph, cmd):
+    return ctk.CTkButton(
+        parent,
+        text=glyph,
+        width=28,
+        height=28,
+        font=ctk.CTkFont(family=Fonts.ICON, size=13),
+        fg_color="transparent",
+        hover_color=Colors.BG_OVERLAY,
+        text_color=Colors.TEXT_MUTED,
+        corner_radius=Sizing.RADIUS_SM,
+        command=cmd,
+    )
+
+
+# =============================================================
 #  MESSAGE BUBBLE
-#  Renders one chat message (user or AI)
-# ─────────────────────────────────────────────────────────────
+# =============================================================
 
 class MessageBubble(ctk.CTkFrame):
     """
-    A single chat message displayed in the chat panel.
-    Supports user messages (right-aligned) and AI responses (left-aligned).
-    Automatically detects and highlights code blocks.
+    Single chat message. User bubbles are right-aligned in the accent
+    color; assistant messages render as plain wrapped text on the chat
+    background (no bubble), with copy/regenerate actions below.
+
+    Uses pack() internally for the assistant path so action buttons
+    always sit directly under the text with zero gap, regardless of
+    how many lines the text wraps to.
     """
 
-    def __init__(self, parent, role: str, content: str, timestamp: str = None, provider: str = None, **kwargs):
-        """
-        Args:
-            parent:    Parent container widget
-            role:      "user" | "assistant"
-            content:   Message text
-            timestamp: Time string to display
-            provider:  Provider name for AI messages
-        """
+    def __init__(
+        self,
+        parent,
+        role: str,
+        content: str,
+        timestamp: Optional[str] = None,
+        provider: Optional[str] = None,
+        on_regenerate: Optional[Callable[[str], None]] = None,
+        **kwargs,
+    ):
         super().__init__(parent, fg_color="transparent", **kwargs)
 
-        self.role = role
-        self.content = content
-        self.timestamp = timestamp or datetime.now().strftime("%I:%M %p")
-        self.provider = provider
+        self.role          = role
+        self.content       = content
+        self.timestamp     = timestamp or datetime.now().strftime("%I:%M %p")
+        self.provider      = provider
+        self.on_regenerate = on_regenerate
 
-        # Style based on role
         if role == "user":
-            self.bubble_color  = Colors.USER_BG
-            self.border_color  = Colors.USER_BORDER
-            self.text_color    = Colors.TEXT_PRIMARY
-            self.label_color   = Colors.ACCENT
-            self.label_text    = "You"
-            self.anchor        = "e"  # Right-aligned
-            self.padx_config   = (80, 0)
+            self.bubble_color = Colors.USER_BG
+            self.text_color   = Colors.USER_TEXT
+            self.border_color = Colors.USER_BORDER
         else:
-            self.bubble_color  = Colors.AI_BG
-            self.border_color  = Colors.AI_BORDER
-            self.text_color    = Colors.TEXT_PRIMARY
-            self.label_color   = Colors.TEXT_SECONDARY
-            self.label_text    = "Drex"
-            self.anchor        = "w"  # Left-aligned
-            self.padx_config   = (0, 80)
+            self.bubble_color = Colors.DREX_BG
+            self.text_color   = Colors.DREX_TEXT
+            self.border_color = Colors.DREX_BORDER
 
+        self._copy_action = None
         self._build()
 
+    # -----------------------------------------------------
+
     def _build(self):
-        # Outer row: avatar + bubble (or bubble + avatar for user)
         self.grid_columnconfigure(0, weight=1)
 
-        # ── Main bubble container ─────────────────────────────
-        bubble_outer = ctk.CTkFrame(
-            self,
-            fg_color="transparent",
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.grid(row=0, column=0, sticky="ew")
+        row.grid_columnconfigure(1, weight=1)
+
+        if self.role == "assistant":
+            self._build_avatar(row, column=0)
+            content_col = ctk.CTkFrame(row, fg_color="transparent")
+            content_col.grid(row=0, column=1, sticky="ew", padx=(10, 60))
+            self._build_content(content_col, side="w")
+        else:
+            content_col = ctk.CTkFrame(row, fg_color="transparent")
+            content_col.grid(row=0, column=1, sticky="ew", padx=(60, 10))
+            self._build_content(content_col, side="e")
+            self._build_avatar(row, column=2)
+
+    def _build_avatar(self, parent, column: int):
+        if self.role == "assistant":
+            bg, fg, char, sz = Colors.ACCENT, Colors.TEXT_INVERSE, Icons.SPARKLE, 15
+        else:
+            bg, fg, char, sz = Colors.BG_OVERLAY, Colors.TEXT_SECONDARY, Icons.USER, 14
+
+        avatar = ctk.CTkLabel(
+            parent,
+            text=char,
+            width=Sizing.CHAT_AVATAR_SIZE,
+            height=Sizing.CHAT_AVATAR_SIZE,
+            fg_color=bg,
+            text_color=fg,
+            font=ctk.CTkFont(family=Fonts.ICON, size=sz),
+            corner_radius=Sizing.RADIUS_PILL,
         )
-        bubble_outer.pack(
-            fill="x",
-            padx=(self.padx_config[0], self.padx_config[1]),
-            pady=(2, 2)
+        avatar.grid(row=0, column=column, sticky="n", pady=1)
+
+    def _build_content(self, parent, side: str):
+        # Meta row: name + timestamp + provider
+        meta = ctk.CTkFrame(parent, fg_color="transparent")
+        meta.pack(fill="x", pady=(0, 4), anchor="w" if side == "w" else "e")
+
+        name = "DREX" if self.role == "assistant" else "You"
+        name_lbl = ctk.CTkLabel(
+            meta,
+            text=name,
+            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.SM, weight="bold"),
+            text_color=Colors.TEXT_PRIMARY,
         )
-
-        # Role label + timestamp + provider row
-        meta_frame = ctk.CTkFrame(bubble_outer, fg_color="transparent")
-        meta_frame.pack(fill="x", padx=4, pady=(0, 2))
-
-        ctk.CTkLabel(
-            meta_frame,
-            text=self.label_text,
-            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.XS, weight="bold"),
-            text_color=self.label_color,
-            anchor=self.anchor,
-        ).pack(side="left" if self.role == "assistant" else "right")
-
-        if self.provider and self.role == "assistant":
-            ctk.CTkLabel(
-                meta_frame,
-                text=f"via {self.provider}",
-                font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.XS),
-                text_color=Colors.ACCENT_DIM,
-            ).pack(side="left" if self.role == "assistant" else "right", padx=(6, 0))
-
-        ctk.CTkLabel(
-            meta_frame,
+        ts_lbl = ctk.CTkLabel(
+            meta,
             text=self.timestamp,
             font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.XS),
             text_color=Colors.TEXT_MUTED,
-        ).pack(side="right" if self.role == "assistant" else "left", padx=(8, 0))
+        )
 
-        # Detect if content has code blocks
-        has_code = "```" in self.content
-
-        if has_code:
-            self._render_mixed_content(bubble_outer)
+        if side == "w":
+            name_lbl.pack(side="left")
+            ts_lbl.pack(side="left", padx=(8, 0))
+            if self.provider:
+                ctk.CTkLabel(
+                    meta,
+                    text=f"· {self.provider}",
+                    font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.XS),
+                    text_color=Colors.ACCENT_DIM,
+                ).pack(side="left", padx=(6, 0))
         else:
-            self._render_text_bubble(bubble_outer, self.content)
+            name_lbl.pack(side="right")
+            ts_lbl.pack(side="right", padx=(0, 8))
 
-    def _render_text_bubble(self, parent, text: str):
-        """Render a plain text bubble."""
-        bubble = ctk.CTkFrame(
-            parent,
-            fg_color=self.bubble_color,
-            corner_radius=Sizing.RADIUS_LG,
-            border_width=1,
-            border_color=self.border_color,
-        )
-        bubble.pack(fill="x", anchor=self.anchor)
+        # Content
+        if "```" in self.content:
+            self._render_mixed(parent, side)
+        else:
+            self._render_content(parent, self.content, side)
 
-        ctk.CTkLabel(
-            bubble,
-            text=text,
-            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.BASE),
-            text_color=self.text_color,
-            wraplength=Sizing.CHAT_MSG_MAX_W,
-            justify="left",
-            anchor="w",
-        ).pack(
-            padx=Sizing.CHAT_MSG_PADDING,
-            pady=Sizing.CHAT_MSG_PADDING,
-            fill="x"
-        )
+        # Action row (assistant only) -- packed directly after the text,
+        # so there is no possible gap regardless of wrap height.
+        if self.role == "assistant":
+            self._build_actions(parent)
 
-    def _render_mixed_content(self, parent):
-        """Render message with interspersed text and code blocks."""
-        import re
-        parts = re.split(r'```(?:\w+)?\n?(.*?)```', self.content, flags=re.DOTALL)
+    def _render_content(self, parent, text: str, side: str):
+        """Render text directly -- no bubble frame for assistant."""
+        if self.role == "assistant":
+            lbl = ctk.CTkLabel(
+                parent,
+                text=text,
+                font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.MD),
+                text_color=self.text_color,
+                wraplength=Sizing.CHAT_MSG_MAX_W,
+                justify="left",
+                anchor="w",
+            )
+            lbl.pack(fill="x", anchor="w")
+        else:
+            bubble = ctk.CTkFrame(
+                parent,
+                fg_color=self.bubble_color,
+                corner_radius=Sizing.RADIUS_LG,
+                border_width=1,
+                border_color=self.border_color,
+            )
+            bubble.pack(anchor="e" if side == "e" else "w")
 
-        # parts alternates: [text, code, text, code, ...]
+            ctk.CTkLabel(
+                bubble,
+                text=text,
+                font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.MD),
+                text_color=self.text_color,
+                wraplength=Sizing.CHAT_MSG_MAX_W - 2 * Sizing.CHAT_MSG_PADDING,
+                justify="left",
+                anchor="w",
+            ).pack(padx=Sizing.CHAT_MSG_PADDING,
+                   pady=(Spacing.MD, Spacing.MD), fill="x")
+
+    def _render_mixed(self, parent, side: str):
+        parts = re.split(r"```(?:\w+)?\n?(.*?)```", self.content, flags=re.DOTALL)
         for i, part in enumerate(parts):
             if not part.strip():
                 continue
             if i % 2 == 0:
-                # Regular text
-                self._render_text_bubble(parent, part.strip())
+                self._render_content(parent, part.strip(), side)
             else:
-                # Code block
-                CodeBlock(parent, code=part.strip()).pack(fill="x", pady=(4, 0))
+                block = CodeBlock(parent, code=part.strip())
+                block.pack(fill="x", pady=(4, 0))
+
+    def _build_actions(self, parent):
+        strip = ctk.CTkFrame(parent, fg_color="transparent")
+        strip.pack(fill="x", anchor="w", pady=(Spacing.SM, 0))
+
+        def _regenerate():
+            if self.on_regenerate:
+                self.on_regenerate(self.content)
+
+        self._copy_action = _mini_action_button(strip, Icons.COPY, self._copy)
+        self._copy_action.pack(side="left", padx=(0, 2))
+        _mini_action_button(strip, Icons.REFRESH, _regenerate).pack(side="left", padx=(0, 2))
+
+    def _copy(self):
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(self.content)
+            if self._copy_action is not None:
+                self._copy_action.configure(text=Icons.CHECK, text_color=Colors.SUCCESS)
+                self.after(1400, lambda: self._copy_action.configure(
+                    text=Icons.COPY, text_color=Colors.TEXT_MUTED))
+        except Exception:
+            pass
 
 
-# ─────────────────────────────────────────────────────────────
+# =============================================================
 #  STREAMING LABEL
-#  Live-updating label for realtime token rendering
-# ─────────────────────────────────────────────────────────────
+# =============================================================
 
 class StreamingLabel(ctk.CTkFrame):
-    """
-    A label that can be incrementally updated with streaming tokens.
-    Displays tokens as they arrive for a realtime typing effect.
+    """Live-updating assistant message for token streaming.
 
-    Usage:
-        label = StreamingLabel(parent, provider="Gemini")
-        label.pack(...)
-        label.append("Hello ")
-        label.append("world!")
-        full_text = label.get_text()  # "Hello world!"
-        label.stop()
+    Renders as plain text on the chat background (no bubble).
+    Sizing is synchronous (CTkLabel + wraplength), so
+    on_height_settled fires immediately/reliably on every append and
+    on finalize -- no async settling period to race against.
     """
 
-    def __init__(self, parent, provider: str = "", **kwargs):
+    def __init__(
+        self,
+        parent,
+        on_regenerate: Optional[Callable[[str], None]] = None,
+        on_height_settled: Optional[Callable[[], None]] = None,
+        **kwargs,
+    ):
         super().__init__(parent, fg_color="transparent", **kwargs)
 
+        self.on_regenerate     = on_regenerate
+        self.on_height_settled = on_height_settled
+
         self._full_text = ""
+        self._finalized = False
+        self._copy_action = None
 
-        # Container bubble (AI-style)
-        bubble = ctk.CTkFrame(
-            self,
-            fg_color=Colors.AI_BG,
-            corner_radius=Sizing.RADIUS_LG,
-            border_width=1,
-            border_color=Colors.AI_BORDER,
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x")
+        row.grid_columnconfigure(1, weight=1)
+
+        avatar = ctk.CTkLabel(
+            row,
+            text=Icons.SPARKLE,
+            width=Sizing.CHAT_AVATAR_SIZE,
+            height=Sizing.CHAT_AVATAR_SIZE,
+            fg_color=Colors.ACCENT,
+            text_color=Colors.TEXT_INVERSE,
+            font=ctk.CTkFont(family=Fonts.ICON, size=15),
+            corner_radius=Sizing.RADIUS_PILL,
         )
-        bubble.pack(anchor="w", fill="x", padx=(0, 80))
+        avatar.grid(row=0, column=0, sticky="n", pady=1)
 
-        # Provider badge
-        if provider:
-            badge_frame = ctk.CTkFrame(bubble, fg_color="transparent")
-            badge_frame.pack(fill="x", padx=14, pady=(8, 0))
+        self._content = ctk.CTkFrame(row, fg_color="transparent")
+        self._content.grid(row=0, column=1, sticky="ew", padx=(10, 60))
+        self._content.grid_columnconfigure(0, weight=1)
 
-            ctk.CTkLabel(
-                badge_frame,
-                text=provider,
-                font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.XS, weight="bold"),
-                text_color=Colors.ACCENT,
-                anchor="w",
-            ).pack(fill="x")
+        ctk.CTkLabel(
+            self._content,
+            text="DREX",
+            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.SM, weight="bold"),
+            text_color=Colors.TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 4))
 
-        # Streaming text label
         self._label = ctk.CTkLabel(
-            bubble,
+            self._content,
             text="",
-            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.BASE),
+            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.MD),
             text_color=Colors.TEXT_PRIMARY,
             wraplength=Sizing.CHAT_MSG_MAX_W,
             justify="left",
             anchor="w",
         )
-        self._label.pack(
-            fill="x",
-            padx=Spacing.LG,
-            pady=Spacing.MD,
-        )
+        self._label.pack(fill="x", anchor="w")
 
-        # Blinking cursor indicator
-        self._cursor = ctk.CTkLabel(
-            bubble,
-            text="▍",
-            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.BASE),
-            text_color=Colors.ACCENT,
-        )
-        self._cursor.pack(side="right", padx=(0, 14), pady=(0, 12))
-        self._blink_cursor()
+        self._alive = True
+        self._caret_on = True
+        self._blink()
 
-    def _blink_cursor(self):
-        """Blink the cursor indicator while streaming."""
-        if not hasattr(self, '_cursor') or not self._cursor:
-            return
-        current = self._cursor.cget("text_color")
-        new_color = Colors.ACCENT if current == Colors.TEXT_MUTED else Colors.TEXT_MUTED
+    def _render(self):
         try:
-            self._cursor.configure(text_color=new_color)
+            caret = "▏" if self._caret_on else " "
+            self._label.configure(text=self._full_text + caret)
+            if self.on_height_settled:
+                self.on_height_settled()
         except Exception:
             pass
-        self.after(500, self._blink_cursor)
 
-    def append(self, token: str) -> None:
-        """
-        Append a token to the streaming text.
+    def _blink(self):
+        if not self._alive:
+            return
+        self._caret_on = not self._caret_on
+        self._render()
+        self.after(530, self._blink)
 
-        Args:
-            token: Text token to append.
-        """
+    def append(self, token: str):
         self._full_text += token
+        self._render()
+
+    def get_text(self) -> str:
+        return self._full_text
+
+    def start(self):
+        pass
+
+    def stop(self):
+        self._alive = False
         try:
             self._label.configure(text=self._full_text)
         except Exception:
             pass
 
-    def get_text(self) -> str:
-        """Get the full accumulated text."""
-        return self._full_text
+    def finalize(self, provider: Optional[str] = None, final_text: str = ""):
+        """Convert streaming label to a static message with action buttons."""
+        if self._finalized:
+            return
+        self._finalized = True
+        self._alive = False
 
-    def start(self):
-        """Start the streaming label (show cursor)."""
-        pass  # Cursor starts automatically
+        if final_text and not self._full_text:
+            self._full_text = final_text
 
-    def stop(self):
-        """Stop the streaming label and remove cursor."""
-        if hasattr(self, '_cursor') and self._cursor:
+        try:
+            self._label.configure(text=self._full_text)
+        except Exception:
+            pass
+
+        strip = ctk.CTkFrame(self._content, fg_color="transparent")
+        strip.pack(fill="x", anchor="w", pady=(Spacing.SM, 0))
+
+        def _copy():
             try:
-                self._cursor.destroy()
+                self.clipboard_clear()
+                self.clipboard_append(self._full_text)
+                self._copy_action.configure(text=Icons.CHECK, text_color=Colors.SUCCESS)
+                self.after(1400, lambda: self._copy_action.configure(
+                    text=Icons.COPY, text_color=Colors.TEXT_MUTED))
             except Exception:
                 pass
-            self._cursor = None
+
+        def _regenerate():
+            if self.on_regenerate:
+                self.on_regenerate(self._full_text)
+
+        self._copy_action = _mini_action_button(strip, Icons.COPY, _copy)
+        self._copy_action.pack(side="left", padx=(0, 2))
+        _mini_action_button(strip, Icons.REFRESH, _regenerate).pack(side="left", padx=(0, 2))
+
+        if self.on_height_settled:
+            try:
+                self.on_height_settled()
+            except Exception:
+                pass
+
+    def destroy(self):
+        self._alive = False
+        return super().destroy()
 
 
-# ─────────────────────────────────────────────────────────────
+# =============================================================
 #  CODE BLOCK
-#  Dark monospace code display for AI code responses
-# ─────────────────────────────────────────────────────────────
+# =============================================================
 
 class CodeBlock(ctk.CTkFrame):
-    """Displays a code snippet with copy button."""
+    """Monospace code snippet with a copy button."""
 
     def __init__(self, parent, code: str, language: str = "", **kwargs):
         super().__init__(
             parent,
-            fg_color=Colors.BG_DARKEST,
+            fg_color=Colors.BG_BASE,
             corner_radius=Sizing.RADIUS_MD,
             border_width=1,
-            border_color=Colors.BG_BORDER,
-            **kwargs
+            border_color=Colors.BORDER,
+            **kwargs,
         )
         self.code = code
 
-        # Header bar
-        header = ctk.CTkFrame(self, fg_color=Colors.BG_PANEL, corner_radius=0)
+        header = ctk.CTkFrame(self, fg_color=Colors.BG_SURFACE, corner_radius=0)
         header.pack(fill="x")
 
         ctk.CTkLabel(
             header,
-            text=language or "code",
+            text=(language or "code").lower(),
             font=ctk.CTkFont(family=Fonts.MONO, size=Fonts.XS),
             text_color=Colors.TEXT_MUTED,
         ).pack(side="left", padx=10, pady=4)
 
-        # Copy button
-        copy_btn = ctk.CTkButton(
+        self._copy_btn = ctk.CTkButton(
             header,
             text="Copy",
-            width=50,
-            height=22,
+            width=58,
+            height=24,
             font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.XS),
-            fg_color=Colors.BG_ELEVATED,
-            hover_color=Colors.BG_BORDER,
+            fg_color="transparent",
+            hover_color=Colors.BG_OVERLAY,
             text_color=Colors.TEXT_SECONDARY,
-            corner_radius=4,
-            command=self._copy_code,
+            corner_radius=Sizing.RADIUS_SM,
+            command=self._copy,
         )
-        copy_btn.pack(side="right", padx=6, pady=4)
-        self._copy_btn = copy_btn
+        self._copy_btn.pack(side="right", padx=6, pady=4)
 
-        # Code content
         text_widget = tk.Text(
             self,
             font=(Fonts.MONO, Fonts.SM),
-            bg=Colors.BG_DARKEST,
-            fg=Colors.ACCENT,
+            bg=Colors.BG_BASE,
+            fg=Colors.TEXT_PRIMARY,
             insertbackground=Colors.ACCENT,
-            selectbackground=Colors.ACCENT_DARK,
+            selectbackground=Colors.ACCENT_DIM,
+            selectforeground=Colors.TEXT_INVERSE,
             relief="flat",
             padx=12,
             pady=8,
             wrap="none",
-            state="normal",
-            height=min(code.count('\n') + 2, 20),
+            height=min(code.count("\n") + 2, 20),
             cursor="arrow",
+            bd=0,
+            highlightthickness=0,
         )
         text_widget.insert("1.0", code)
         text_widget.configure(state="disabled")
         text_widget.pack(fill="both", expand=True)
 
-    def _copy_code(self):
-        """Copy code to clipboard."""
-        self.clipboard_clear()
-        self.clipboard_append(self.code)
-        self._copy_btn.configure(text="✓ Copied!")
-        self.after(2000, lambda: self._copy_btn.configure(text="Copy"))
+    def _copy(self):
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(self.code)
+            self._copy_btn.configure(text="Copied", text_color=Colors.SUCCESS)
+            self.after(1500, lambda: self._copy_btn.configure(
+                text="Copy", text_color=Colors.TEXT_SECONDARY))
+        except Exception:
+            pass
 
 
-# ─────────────────────────────────────────────────────────────
-#  STATUS DOT
-#  Animated pulsing dot for status bar
-# ─────────────────────────────────────────────────────────────
-
-class StatusDot(ctk.CTkLabel):
-    """
-    Animated colored dot for showing current state.
-    Pulses when in listening or processing mode.
-    """
-
-    def __init__(self, parent, **kwargs):
-        super().__init__(
-            parent,
-            text="●",
-            font=ctk.CTkFont(family=Fonts.PRIMARY, size=14),
-            text_color=Colors.TEXT_SECONDARY,
-            **kwargs
-        )
-        self._is_pulsing = False
-        self._pulse_step = 0
-        self._pulse_colors = []
-
-    def set_state(self, color: str, pulse: bool = False):
-        """
-        Update dot color and optionally start pulsing.
-
-        Args:
-            color: Hex color string
-            pulse: Whether to animate the pulse
-        """
-        self._is_pulsing = False  # Stop any existing pulse
-        self.configure(text_color=color)
-
-        if pulse:
-            self._start_pulse(color)
-
-    def _start_pulse(self, color: str):
-        """Animate the dot between bright and dim."""
-        self._is_pulsing = True
-        self._pulse_step = 0
-
-        def pulse_step():
-            if not self._is_pulsing:
-                return
-            # Alternate between bright and dim every 500ms
-            self._pulse_step += 1
-            show_bright = (self._pulse_step % 2 == 0)
-            self.configure(text_color=color if show_bright else Colors.TEXT_MUTED)
-            self.after(500, pulse_step)
-
-        pulse_step()
-
-    def stop_pulse(self):
-        self._is_pulsing = False
-
-
-# ─────────────────────────────────────────────────────────────
+# =============================================================
 #  TYPING INDICATOR
-#  Animated dots shown while Drex is thinking
-# ─────────────────────────────────────────────────────────────
+# =============================================================
 
 class TypingIndicator(ctk.CTkFrame):
-    """
-    Shows an animated 'Drex is thinking...' indicator.
-    Displays three dots that cycle through being highlighted.
-    """
+    """'DREX is thinking' with three animated dots."""
 
     def __init__(self, parent, **kwargs):
         super().__init__(parent, fg_color="transparent", **kwargs)
-        self._is_animating = False
-        self._step = 0
-        self._dots = []
 
-        # Container bubble
+        self._alive = True
+        self._step  = 0
+        self._dots  = []
+
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x")
+
+        avatar = ctk.CTkLabel(
+            row,
+            text=Icons.SPARKLE,
+            width=Sizing.CHAT_AVATAR_SIZE,
+            height=Sizing.CHAT_AVATAR_SIZE,
+            fg_color=Colors.ACCENT,
+            text_color=Colors.TEXT_INVERSE,
+            font=ctk.CTkFont(family=Fonts.ICON, size=15),
+            corner_radius=Sizing.RADIUS_PILL,
+        )
+        avatar.pack(side="left", padx=(0, 10))
+
         bubble = ctk.CTkFrame(
-            self,
-            fg_color=Colors.AI_BG,
+            row,
+            fg_color=Colors.DREX_BG,
             corner_radius=Sizing.RADIUS_LG,
             border_width=1,
-            border_color=Colors.AI_BORDER,
+            border_color=Colors.DREX_BORDER,
         )
-        bubble.pack(anchor="w", padx=(0, 80))
+        bubble.pack(side="left")
 
         inner = ctk.CTkFrame(bubble, fg_color="transparent")
-        inner.pack(padx=16, pady=12)
-
-        ctk.CTkLabel(
-            inner,
-            text="Drex is thinking",
-            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.SM),
-            text_color=Colors.TEXT_MUTED,
-        ).pack(side="left")
-
-        dots_frame = ctk.CTkFrame(inner, fg_color="transparent")
-        dots_frame.pack(side="left", padx=(6, 0))
+        inner.pack(padx=Sizing.CHAT_MSG_PADDING, pady=Sizing.CHAT_MSG_PADDING)
 
         for _ in range(3):
             dot = ctk.CTkLabel(
-                dots_frame,
+                inner,
                 text="●",
-                font=ctk.CTkFont(family=Fonts.PRIMARY, size=8),
-                text_color=Colors.TEXT_MUTED,
+                font=ctk.CTkFont(family=Fonts.PRIMARY, size=9),
+                text_color=Colors.TEXT_FAINT,
             )
-            dot.pack(side="left", padx=1)
+            dot.pack(side="left", padx=3)
             self._dots.append(dot)
 
-    def start(self):
-        """Begin the animation."""
-        self._is_animating = True
+        self._ramp = [Colors.TEXT_FAINT, Colors.TEXT_MUTED,
+                      Colors.TEXT_SECONDARY, Colors.ACCENT_LIGHT]
         self._animate()
 
-    def stop(self):
-        """Stop the animation."""
-        self._is_animating = False
-
     def _animate(self):
-        if not self._is_animating:
+        if not self._alive:
             return
+        n = len(self._ramp) - 1
         for i, dot in enumerate(self._dots):
-            dot.configure(
-                text_color=Colors.ACCENT if i == self._step else Colors.TEXT_MUTED
-            )
-        self._step = (self._step + 1) % 3
-        self.after(Anim.NORMAL + 100, self._animate)
+            level = (self._step - i) % (n + 1)
+            try:
+                dot.configure(text_color=self._ramp[level])
+            except Exception:
+                return
+        self._step = (self._step + 1) % (n + 1)
+        self.after(180, self._animate)
+
+    def start(self):
+        pass
+
+    def stop(self):
+        self._alive = False
+
+    def destroy(self):
+        self._alive = False
+        return super().destroy()
 
 
-# ─────────────────────────────────────────────────────────────
-#  SIDEBAR BUTTON
-#  Navigation button with icon and text label
-# ─────────────────────────────────────────────────────────────
-
-class SidebarButton(ctk.CTkButton):
-    """Navigation button for the sidebar."""
-
-    def __init__(self, parent, icon: str, label: str, active: bool = False, **kwargs):
-        self._active = active
-        fg = Colors.ACCENT_DARK if active else "transparent"
-        text_color = Colors.ACCENT if active else Colors.TEXT_SECONDARY
-
-        super().__init__(
-            parent,
-            text=f"  {icon}  {label}",
-            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.SM, weight="bold" if active else "normal"),
-            fg_color=fg,
-            hover_color=Colors.BG_ELEVATED,
-            text_color=text_color,
-            corner_radius=Sizing.RADIUS_MD,
-            height=Sizing.BTN_HEIGHT + 2,
-            anchor="w",
-            border_width=0,
-            **kwargs
-        )
-
-    def set_active(self, active: bool):
-        self._active = active
-        self.configure(
-            fg_color=Colors.ACCENT_DARK if active else "transparent",
-            text_color=Colors.ACCENT if active else Colors.TEXT_SECONDARY,
-        )
-
-
-# ─────────────────────────────────────────────────────────────
-#  ANIMATED BUTTON
-#  Standard button with smooth color transitions on hover
-# ─────────────────────────────────────────────────────────────
+# =============================================================
+#  BUTTONS
+# =============================================================
 
 class PrimaryButton(ctk.CTkButton):
-    """Cyan accent primary action button."""
-
     def __init__(self, parent, **kwargs):
         super().__init__(
             parent,
-            fg_color=Colors.BTN_PRIMARY,
-            hover_color=Colors.BTN_PRIMARY_HOVER,
-            text_color=Colors.BG_DARK,
+            fg_color=Colors.ACCENT,
+            hover_color=Colors.ACCENT_HOVER,
+            text_color=Colors.TEXT_INVERSE,
             font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.SM, weight="bold"),
             corner_radius=Sizing.RADIUS_MD,
             height=Sizing.BTN_HEIGHT,
-            **kwargs
+            **kwargs,
         )
+        add_press_feedback(self, Colors.ACCENT_HOVER, Colors.ACCENT_PRESS)
 
 
 class SecondaryButton(ctk.CTkButton):
-    """Subtle secondary action button."""
-
     def __init__(self, parent, **kwargs):
         super().__init__(
             parent,
-            fg_color=Colors.BTN_SECONDARY,
-            hover_color=Colors.BTN_SECONDARY_HOVER,
+            fg_color=Colors.BG_ELEVATED,
+            hover_color=Colors.BG_OVERLAY,
             text_color=Colors.TEXT_PRIMARY,
             font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.SM),
             corner_radius=Sizing.RADIUS_MD,
             height=Sizing.BTN_HEIGHT,
-            **kwargs
+            border_width=1,
+            border_color=Colors.BORDER,
+            **kwargs,
         )
+        add_press_feedback(self, Colors.BG_OVERLAY, Colors.BG_PRESSED)
 
 
 class DangerButton(ctk.CTkButton):
-    """Red danger/destructive action button."""
-
     def __init__(self, parent, **kwargs):
         super().__init__(
             parent,
-            fg_color=Colors.BTN_DANGER,
+            fg_color=Colors.ERROR,
             hover_color=Colors.BTN_DANGER_HOVER,
             text_color=Colors.TEXT_PRIMARY,
             font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.SM, weight="bold"),
             corner_radius=Sizing.RADIUS_MD,
             height=Sizing.BTN_HEIGHT,
-            **kwargs
+            **kwargs,
+        )
+        add_press_feedback(self, Colors.BTN_DANGER_HOVER, "#B91C1C")
+
+
+class SidebarButton(ctk.CTkButton):
+    def __init__(self, parent, icon: str, label: str, active: bool = False, **kwargs):
+        self._active = active
+        fg = Colors.BG_OVERLAY if active else "transparent"
+        text_color = Colors.ACCENT if active else Colors.TEXT_SECONDARY
+        super().__init__(
+            parent,
+            text=f"  {icon}  {label}",
+            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.SM,
+                             weight="bold" if active else "normal"),
+            fg_color=fg,
+            hover_color=Colors.BG_OVERLAY,
+            text_color=text_color,
+            corner_radius=Sizing.RADIUS_MD,
+            height=Sizing.BTN_HEIGHT,
+            anchor="w",
+            border_width=0,
+            **kwargs,
+        )
+
+    def set_active(self, active: bool):
+        self._active = active
+        self.configure(
+            fg_color=Colors.BG_OVERLAY if active else "transparent",
+            text_color=Colors.ACCENT if active else Colors.TEXT_SECONDARY,
         )
 
 
-# ─────────────────────────────────────────────────────────────
+# =============================================================
 #  SECTION HEADER
-#  Divider label for grouping content in panels
-# ─────────────────────────────────────────────────────────────
+# =============================================================
 
 class SectionHeader(ctk.CTkLabel):
-    """Small all-caps section label."""
-
     def __init__(self, parent, text: str, **kwargs):
         super().__init__(
             parent,
@@ -582,21 +658,15 @@ class SectionHeader(ctk.CTkLabel):
             font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.XS, weight="bold"),
             text_color=Colors.TEXT_MUTED,
             anchor="w",
-            **kwargs
+            **kwargs,
         )
 
 
-# ─────────────────────────────────────────────────────────────
-#  TOAST NOTIFICATION
-#  Temporary popup message in a corner of the screen
-# ─────────────────────────────────────────────────────────────
+# =============================================================
+#  TOAST
+# =============================================================
 
 class Toast(ctk.CTkToplevel):
-    """
-    Floating notification that auto-dismisses.
-    Shows in bottom-right corner of the screen.
-    """
-
     COLORS = {
         "success": Colors.SUCCESS,
         "error":   Colors.ERROR,
@@ -607,30 +677,30 @@ class Toast(ctk.CTkToplevel):
     def __init__(self, parent, message: str, kind: str = "info", duration_ms: int = 3000):
         super().__init__(parent)
         self.withdraw()
-        self.overrideredirect(True)  # No title bar
+        self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.configure(fg_color=Colors.BG_PANEL)
+        self.configure(fg_color=Colors.BG_ELEVATED)
 
         color = self.COLORS.get(kind, Colors.ACCENT)
 
-        # Content
         frame = ctk.CTkFrame(
             self,
-            fg_color=Colors.BG_PANEL,
+            fg_color=Colors.BG_ELEVATED,
             corner_radius=Sizing.RADIUS_MD,
             border_width=1,
             border_color=color,
         )
         frame.pack(fill="both", expand=True, padx=2, pady=2)
 
-        icon = {"success": "✓", "error": "✕", "warning": "⚠", "info": "ℹ"}.get(kind, "•")
+        icon = {"success": "✓", "error": "✕",
+                "warning": "!", "info": "i"}.get(kind, "•")
 
         ctk.CTkLabel(
             frame,
-            text=f" {icon} ",
+            text=icon,
             font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.MD, weight="bold"),
             text_color=color,
-        ).pack(side="left", padx=(12, 4), pady=12)
+        ).pack(side="left", padx=(14, 6), pady=12)
 
         ctk.CTkLabel(
             frame,
@@ -639,7 +709,6 @@ class Toast(ctk.CTkToplevel):
             text_color=Colors.TEXT_PRIMARY,
         ).pack(side="left", padx=(0, 16), pady=12)
 
-        # Position bottom-right
         self.update_idletasks()
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
@@ -649,6 +718,4 @@ class Toast(ctk.CTkToplevel):
         y = sh - h - 60
         self.geometry(f"{w}x{h}+{x}+{y}")
         self.deiconify()
-
-        # Auto-dismiss
         self.after(duration_ms, self.destroy)

@@ -7,7 +7,7 @@ Supports both synchronous chat and streaming response patterns.
 Official Cerebras model names (as of 2025):
   - llama3.1-8b  (fast, lightweight)
   - llama3.1-70b  (full-size, if available)
-  - llama3.3-70b  (latest, check Cerebras docs)
+  - llama-3.1-8b  (stable, widely available)
 
 If the configured model is unavailable, the client will:
   1. Log a warning with the specific error
@@ -17,7 +17,8 @@ If the configured model is unavailable, the client will:
 This prevents the "Model does not exist" crash seen in earlier versions.
 """
 
-from typing import Callable, Generator, Optional
+import asyncio
+from typing import AsyncGenerator, Callable, Generator, Optional
 from loguru import logger
 from utils.error_handler import AIError
 from config import get_config
@@ -32,6 +33,11 @@ class CerebrasClient(BaseAIClient):
 
     Uses the OpenAI-compatible Cerebras API via the cerebras-cloud-sdk.
     """
+
+    # Known-good Cerebras model IDs, tried in order when the configured
+    # model returns MODEL_NOT_FOUND. The available catalogue varies by
+    # account/plan — query `client.models.list()` to see yours.
+    FALLBACK_MODELS = ["gpt-oss-120b", "zai-glm-4.7", "gemma-4-31b"]
 
     def __init__(self):
         from config import get_config
@@ -100,9 +106,13 @@ class CerebrasClient(BaseAIClient):
         if not self._available or not self._client:
             return None
 
-        # Use the configured model, with the env var as override
+        # Use the configured model, with the env var as override, then
+        # fall back through known-good model IDs on MODEL_NOT_FOUND.
         primary_model = model or self._active_model or self.cfg.cerebras_model
         models_to_try = [primary_model]
+        for m in self.FALLBACK_MODELS:
+            if m and m not in models_to_try:
+                models_to_try.append(m)
 
         last_error = None
         for attempt_model in models_to_try:
@@ -217,45 +227,83 @@ class CerebrasClient(BaseAIClient):
         if not self._available or not self._client:
             return
 
-        active_model = model or self._active_model or self.cfg.cerebras_model or "llama3.1-8b"
+        primary_model = model or self._active_model or self.cfg.cerebras_model or "llama3.1-8b"
+        models_to_try = [primary_model]
+        for m in self.FALLBACK_MODELS:
+            if m and m not in models_to_try:
+                models_to_try.append(m)
+
         all_messages = []
         if system_prompt:
             all_messages.append({"role": "system", "content": system_prompt})
         all_messages.extend(messages)
 
-        try:
-            stream = self._client.chat.completions.create(
-                model=active_model,
-                messages=all_messages,
-                max_tokens=self.cfg.max_tokens,
-                temperature=self.cfg.temperature,
-                stream=True,
-            )
-
-            full_response = []
-            for chunk in stream:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    token = chunk.choices[0].delta.content
-                    full_response.append(token)
-                    if on_token:
-                        on_token(token)
-                    yield token
-
-            assembled = "".join(full_response)
-            if on_complete:
-                on_complete(assembled)
-            logger.debug(
-                "Cerebras stream [{}] complete ({} chars)",
-                active_model, len(assembled),
-            )
-
-        except Exception as e:
-            error_str = str(e).lower()
-            if "model_not_found" in error_str or "not found" in error_str:
-                logger.error(
-                    "Cerebras model '{}' not found for streaming: {}",
-                    active_model, e,
+        last_error = None
+        for active_model in models_to_try:
+            try:
+                stream = self._client.chat.completions.create(
+                    model=active_model,
+                    messages=all_messages,
+                    max_tokens=self.cfg.max_tokens,
+                    temperature=self.cfg.temperature,
+                    stream=True,
                 )
-                raise AIError("MODEL_NOT_FOUND")
-            logger.error("Cerebras stream error: {}", e)
-            raise
+
+                full_response = []
+                for chunk in stream:
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        token = chunk.choices[0].delta.content
+                        full_response.append(token)
+                        if on_token:
+                            on_token(token)
+                        yield token
+
+                # Success — remember the working model for next time.
+                self._active_model = active_model
+                assembled = "".join(full_response)
+                if on_complete:
+                    on_complete(assembled)
+                logger.debug(
+                    "Cerebras stream [{}] complete ({} chars)",
+                    active_model, len(assembled),
+                )
+                return
+
+            except Exception as e:
+                error_str = str(e).lower()
+                if "model_not_found" in error_str or "not found" in error_str:
+                    logger.warning(
+                        "Cerebras model '{}' not found for streaming. Trying fallback...",
+                        active_model,
+                    )
+                    last_error = e
+                    continue
+                logger.error("Cerebras stream error [{}]: {}", active_model, e)
+                raise
+
+        logger.error(
+            "All Cerebras models failed for streaming. Last error: {}",
+            last_error,
+        )
+        raise AIError("MODEL_NOT_FOUND")
+
+    async def stream_response(self, prompt: str, context: list = None) -> AsyncGenerator[str, None]:
+        """
+        Async generator that yields text chunks as they arrive from Cerebras.
+        
+        Args:
+            prompt: The user prompt.
+            context: Optional list of context messages.
+            
+        Yields:
+            Text chunks as strings, never returns full string.
+        """
+        messages = [{"role": "user", "content": prompt}]
+        if context:
+            messages = context + messages
+        gen = self.stream_chat(
+            messages=messages,
+            system_prompt="",
+        )
+        for token in gen:
+            yield token

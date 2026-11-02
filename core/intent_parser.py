@@ -88,6 +88,15 @@ INTENT_PATTERNS = {
         (r"(?:be more|act more|become more)\s+(friendly|professional|technical|calm)", "switch"),
         (r"(jarvis|friendly|hacker|calm)\s+mode", "switch"),
     ],
+    "screen_query": [
+        (r"(?:what(?:'s| is) on (?:my )?(?:screen|desktop|display)|what do (?:you )?see)", "describe"),
+        (r"(?:describe|tell me about|analyze) (?:my )?(?:screen|desktop|display)", "describe"),
+        (r"(?:what app|what application|what program) (?:is open|am i using|is running)", "active_app"),
+        (r"(?:read|extract|get) (?:my )?(?:screen|display)", "read_text"),
+        (r"(?:take|capture) (?:a )?(?:screenshot|screen[ -]?shot)", "screenshot"),
+        (r"(?:what(?:'s| is) in front of me|look at (?:my )?screen)", "describe"),
+        (r"(?:look |what can you )?see (?:on )?(?:my )?(?:screen|monitor)", "describe"),
+    ],
 }
 
 

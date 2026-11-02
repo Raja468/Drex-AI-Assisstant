@@ -16,7 +16,8 @@ Get key at: https://openrouter.ai
 import requests
 import json
 import time
-from typing import Callable, Generator, Optional
+import asyncio
+from typing import AsyncGenerator, Callable, Generator, Optional
 from utils.logger import logger
 from utils.error_handler import AIError
 from brain.base_client import BaseAIClient, StreamCallback
@@ -267,6 +268,27 @@ class OpenRouterClient(BaseAIClient):
         except Exception as e:
             logger.error(f"OpenRouter stream failed: {e}")
             raise
+
+    async def stream_response(self, prompt: str, context: list = None) -> AsyncGenerator[str, None]:
+        """
+        Async generator that yields text chunks as they arrive from OpenRouter.
+        
+        Args:
+            prompt: The user prompt.
+            context: Optional list of context messages.
+            
+        Yields:
+            Text chunks as strings, never returns full string.
+        """
+        messages = [{"role": "user", "content": prompt}]
+        if context:
+            messages = context + messages
+        gen = self.stream_chat(
+            messages=messages,
+            system_prompt="",
+        )
+        for token in gen:
+            yield token
 
     def quick_ask(self, question: str, system: str = "") -> Optional[str]:
         """Fast one-shot question using a small free model."""

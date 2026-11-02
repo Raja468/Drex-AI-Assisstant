@@ -1,208 +1,272 @@
 # ============================================================
 #  DREX - AI Desktop Assistant
-#  gui/sidebar.py  —  Left Navigation Sidebar
+#  gui/sidebar.py - Premium Left Sidebar
 #
-#  WHAT IT DOES:
-#  The left panel of the main window containing:
-#  - Drex logo/title
-#  - Navigation: Chat, Skills, Memory, Settings
-#  - AI provider status indicators
-#  - Session statistics
-#  - Listening toggle button
+#  Structure:
+#    Top     -> logo, New Chat, search
+#    Middle  -> pinned / recent / projects / downloads / plugins
+#    Bottom  -> user profile, version
 # ============================================================
 
 import customtkinter as ctk
-from gui.theme import Colors, Fonts, Sizing, Spacing
-from gui.widgets import SidebarButton, SectionHeader, StatusDot
-from utils.logger import logger
+from typing import Callable, Optional
+
+from gui.theme import Colors, Fonts, Sizing, Spacing, Icons
+from gui.chat_list import ChatList
+from gui.project_list import ProjectList
+from gui.plugin_list import PluginList
+from gui.download_list import DownloadList
 
 
 class Sidebar(ctk.CTkFrame):
-    """
-    Left sidebar with navigation and system status.
-    """
+    """Fixed-width sidebar with a modern, minimal look."""
 
-    def __init__(self, parent, orchestrator=None, on_nav_change=None, **kwargs):
+    def __init__(
+        self,
+        parent,
+        on_nav_change: Optional[Callable[[str], None]] = None,
+        on_chat_select: Optional[Callable[[str], None]] = None,
+        **kwargs,
+    ):
         super().__init__(
             parent,
-            fg_color=Colors.BG_PANEL,
+            fg_color=Colors.BG_SIDEBAR,
             corner_radius=0,
             width=Sizing.SIDEBAR_W,
-            border_width=1,
-            border_color=Colors.BG_BORDER,
-            **kwargs
+            border_width=0,
+            **kwargs,
         )
-        self.grid_propagate(False)  # Keep fixed width
+        self.grid_propagate(False)
 
-        self.orchestrator   = orchestrator
-        self.on_nav_change  = on_nav_change
-        self._active_section = "chat"
-        self._nav_buttons   = {}
-
+        self.on_nav_change = on_nav_change
+        self.on_chat_select = on_chat_select
         self._build()
-        logger.debug("Sidebar initialized")
+
+    # -----------------------------------------------------
+    #  Layout
+    # -----------------------------------------------------
 
     def _build(self):
-        self.grid_rowconfigure(4, weight=1)  # Spacer row
+        # Right hairline separator
+        sep = ctk.CTkFrame(self, fg_color=Colors.BORDER, width=1, corner_radius=0)
+        sep.place(relx=1.0, rely=0, relheight=1.0, anchor="ne")
+
+        # rows: 0 header, 1 new chat + search, 2 scrollable body (grows), 3 footer
+        self.grid_rowconfigure(2, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        self._build_logo()
-        self._build_nav()
-        self._build_spacer()
-        self._build_ai_status()
-        self._build_footer()
+        # ----- Header (mini logo) -----
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew",
+                    padx=Spacing.LG, pady=(Spacing.LG, Spacing.MD))
 
-    # ── Logo / Header ─────────────────────────────────────────
-
-    def _build_logo(self):
-        logo_frame = ctk.CTkFrame(self, fg_color="transparent")
-        logo_frame.grid(row=0, column=0, sticky="ew", padx=16, pady=(20, 16))
-
-        # Glowing icon
         ctk.CTkLabel(
-            logo_frame,
-            text="◈",
-            font=ctk.CTkFont(family=Fonts.PRIMARY, size=28),
-            text_color=Colors.ACCENT,
+            header,
+            text=Icons.SPARKLE,
+            width=30,
+            height=30,
+            font=ctk.CTkFont(family=Fonts.ICON, size=15),
+            fg_color=Colors.ACCENT,
+            text_color=Colors.TEXT_INVERSE,
+            corner_radius=Sizing.RADIUS_MD,
+        ).pack(side="left", padx=(0, 10))
+
+        ctk.CTkLabel(
+            header,
+            text="DREX",
+            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.LG, weight="bold"),
+            text_color=Colors.TEXT_PRIMARY,
         ).pack(side="left")
 
-        title_col = ctk.CTkFrame(logo_frame, fg_color="transparent")
-        title_col.pack(side="left", padx=8)
+        # ----- New chat + search -----
+        actions = ctk.CTkFrame(self, fg_color="transparent")
+        actions.grid(row=1, column=0, sticky="ew",
+                     padx=Spacing.MD, pady=(0, Spacing.MD))
+        actions.grid_columnconfigure(0, weight=1)
+
+        self._new_chat_btn = ctk.CTkButton(
+            actions,
+            text="+   New chat",
+            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.SM, weight="bold"),
+            fg_color=Colors.ACCENT,
+            hover_color=Colors.ACCENT_HOVER,
+            text_color=Colors.TEXT_INVERSE,
+            corner_radius=Sizing.RADIUS_MD,
+            height=40,
+            command=self._on_new_chat,
+        )
+        self._new_chat_btn.grid(row=0, column=0, sticky="ew", pady=(0, Spacing.SM))
+
+        # Search field: a bordered wrapper holding a leading glyph + borderless entry.
+        self._search_wrap = ctk.CTkFrame(
+            actions,
+            fg_color=Colors.BG_ELEVATED,
+            border_width=1,
+            border_color=Colors.BORDER,
+            corner_radius=Sizing.RADIUS_MD,
+            height=36,
+        )
+        self._search_wrap.grid(row=1, column=0, sticky="ew")
+        self._search_wrap.grid_propagate(False)
+        self._search_wrap.grid_columnconfigure(1, weight=1)
+        self._search_wrap.grid_rowconfigure(0, weight=1)
 
         ctk.CTkLabel(
-            title_col,
-            text="Drex",
-            font=ctk.CTkFont(family=Fonts.DISPLAY, size=Fonts.XL, weight="bold"),
+            self._search_wrap,
+            text=Icons.SEARCH,
+            width=16,
+            font=ctk.CTkFont(family=Fonts.ICON, size=13),
+            text_color=Colors.TEXT_MUTED,
+            fg_color="transparent",
+        ).grid(row=0, column=0, padx=(Spacing.MD, Spacing.SM))
+
+        self._search_entry = ctk.CTkEntry(
+            self._search_wrap,
+            placeholder_text="Search chats",
+            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.SM),
+            fg_color="transparent",
+            border_width=0,
+            text_color=Colors.TEXT_PRIMARY,
+            placeholder_text_color=Colors.TEXT_MUTED,
+            height=32,
+        )
+        self._search_entry.grid(row=0, column=1, sticky="ew", padx=(0, Spacing.SM))
+        self._search_entry.bind("<KeyRelease>", self._on_search)
+
+        # Focus ring: brighten the wrapper border while the field is active.
+        self._search_entry.bind(
+            "<FocusIn>",
+            lambda _e: self._search_wrap.configure(border_color=Colors.BORDER_FOCUS))
+        self._search_entry.bind(
+            "<FocusOut>",
+            lambda _e: self._search_wrap.configure(border_color=Colors.BORDER))
+
+        # ----- Scrollable body -----
+        self._scroll = ctk.CTkScrollableFrame(
+            self,
+            fg_color="transparent",
+            corner_radius=0,
+            scrollbar_button_color=Colors.BG_OVERLAY,
+            scrollbar_button_hover_color=Colors.BORDER_LIGHT,
+        )
+        self._scroll.grid(row=2, column=0, sticky="nsew",
+                          padx=(Spacing.SM, 4), pady=(0, Spacing.SM))
+        self._scroll.grid_columnconfigure(0, weight=1)
+
+        self._chat_list = ChatList(self._scroll, on_chat_select=self.on_chat_select)
+        self._chat_list.grid(row=0, column=0, sticky="ew")
+
+        self._project_list = ProjectList(self._scroll)
+        self._project_list.grid(row=1, column=0, sticky="ew",
+                                pady=(Spacing.MD, 0))
+
+        self._download_list = DownloadList(self._scroll)
+        self._download_list.grid(row=2, column=0, sticky="ew",
+                                 pady=(Spacing.MD, 0))
+
+        self._plugin_list = PluginList(self._scroll)
+        self._plugin_list.grid(row=3, column=0, sticky="ew",
+                               pady=(Spacing.MD, 0))
+
+        # ----- Footer (user profile + version) -----
+        footer = ctk.CTkFrame(self, fg_color="transparent")
+        footer.grid(row=3, column=0, sticky="ew",
+                    padx=Spacing.MD, pady=(Spacing.SM, Spacing.MD))
+        footer.grid_columnconfigure(0, weight=1)
+
+        # Divider above footer
+        divider = ctk.CTkFrame(footer, fg_color=Colors.BORDER, height=1)
+        divider.grid(row=0, column=0, columnspan=2, sticky="ew",
+                     pady=(0, Spacing.SM))
+
+        # User row
+        user_row = ctk.CTkFrame(footer, fg_color="transparent")
+        user_row.grid(row=1, column=0, columnspan=2, sticky="ew")
+        user_row.grid_columnconfigure(1, weight=1)
+
+        avatar = ctk.CTkLabel(
+            user_row,
+            text=Icons.USER,
+            width=32,
+            height=32,
+            font=ctk.CTkFont(family=Fonts.ICON, size=14),
+            fg_color=Colors.BG_OVERLAY,
+            text_color=Colors.TEXT_SECONDARY,
+            corner_radius=Sizing.RADIUS_PILL,
+        )
+        avatar.grid(row=0, column=0, padx=(2, 8), pady=4)
+
+        name_col = ctk.CTkFrame(user_row, fg_color="transparent")
+        name_col.grid(row=0, column=1, sticky="ew")
+
+        ctk.CTkLabel(
+            name_col,
+            text="User",
+            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.SM, weight="bold"),
             text_color=Colors.TEXT_PRIMARY,
             anchor="w",
-        ).pack(fill="x")
+        ).pack(anchor="w")
 
         ctk.CTkLabel(
-            title_col,
-            text="AI Assistant",
+            name_col,
+            text="DREX v1.0.0",
             font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.XS),
             text_color=Colors.TEXT_MUTED,
             anchor="w",
-        ).pack(fill="x")
+        ).pack(anchor="w")
 
-        # Divider
-        ctk.CTkFrame(
-            self, height=1, fg_color=Colors.BG_BORDER
-        ).grid(row=1, column=0, sticky="ew", padx=0)
-
-    # ── Navigation ────────────────────────────────────────────
-
-    def _build_nav(self):
-        nav_frame = ctk.CTkFrame(self, fg_color="transparent")
-        nav_frame.grid(row=2, column=0, sticky="ew", padx=8, pady=(12, 0))
-
-        SectionHeader(nav_frame, "Navigation").pack(
-            fill="x", padx=8, pady=(0, 6)
+        self._settings_btn = ctk.CTkButton(
+            user_row,
+            text=Icons.SETTINGS,
+            width=32,
+            height=32,
+            font=ctk.CTkFont(family=Fonts.ICON, size=15),
+            fg_color="transparent",
+            hover_color=Colors.BG_OVERLAY,
+            text_color=Colors.TEXT_SECONDARY,
+            corner_radius=Sizing.RADIUS_MD,
+            command=self._on_settings_click,
         )
+        self._settings_btn.grid(row=0, column=2, padx=(4, 0))
 
-        nav_items = [
-            ("chat",     "💬",  "Chat"),
-            ("memory",   "🧠",  "Memory"),
-            ("settings", "⚙️", "Settings"),
-            ("help",     "❓",  "Help"),
-        ]
+    # -----------------------------------------------------
+    #  Handlers
+    # -----------------------------------------------------
 
-        for key, icon, label in nav_items:
-            btn = SidebarButton(
-                nav_frame,
-                icon=icon,
-                label=label,
-                active=(key == self._active_section),
-                command=lambda k=key: self._on_nav_click(k)
-            )
-            btn.pack(fill="x", pady=2)
-            self._nav_buttons[key] = btn
-
-    def _on_nav_click(self, key: str):
-        """Handle navigation button click."""
-        self._active_section = key
-        for k, btn in self._nav_buttons.items():
-            btn.set_active(k == key)
+    def _on_new_chat(self):
         if self.on_nav_change:
-            self.on_nav_change(key)
+            self.on_nav_change("new_chat")
 
-    # ── Spacer ────────────────────────────────────────────────
-
-    def _build_spacer(self):
-        spacer = ctk.CTkFrame(self, fg_color="transparent")
-        spacer.grid(row=4, column=0, sticky="nsew")
-
-    # ── AI Provider Status ────────────────────────────────────
-
-    def _build_ai_status(self):
-        ctk.CTkFrame(
-            self, height=1, fg_color=Colors.BG_BORDER
-        ).grid(row=5, column=0, sticky="ew")
-
-        status_frame = ctk.CTkFrame(self, fg_color="transparent")
-        status_frame.grid(row=6, column=0, sticky="ew", padx=16, pady=12)
-
-        SectionHeader(status_frame, "AI Providers").pack(fill="x", pady=(0, 8))
-
-        self._provider_rows = {}
-        providers = [
-            ("gemini",     "Gemini",     "⚡"),
-            ("groq",       "Groq",       "🚀"),
-            ("openrouter", "OpenRouter", "🌐"),
-        ]
-
-        for key, label, icon in providers:
-            row = ctk.CTkFrame(status_frame, fg_color="transparent")
-            row.pack(fill="x", pady=2)
-
-            ctk.CTkLabel(
-                row,
-                text=f"{icon} {label}",
-                font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.XS),
-                text_color=Colors.TEXT_SECONDARY,
-                anchor="w",
-            ).pack(side="left")
-
-            dot = StatusDot(row)
-            dot.pack(side="right")
-            dot.set_state(Colors.TEXT_MUTED)  # Default: unknown
-            self._provider_rows[key] = dot
-
-        # Update from orchestrator if available
-        self.after(500, self._update_ai_status)
-
-    def _update_ai_status(self):
-        """Check which AI APIs are online and update the dots."""
-        if not self.orchestrator:
-            return
+    def _on_search(self, event):
+        query = self._search_entry.get().strip().lower()
         try:
-            router = self.orchestrator._ai_router
-            if router:
-                for key, dot in self._provider_rows.items():
-                    available = router._api_health.get(key, False)
-                    dot.set_state(Colors.SUCCESS if available else Colors.ERROR)
-        except Exception as e:
-            logger.debug(f"Could not update AI status: {e}")
+            self._chat_list.filter(query)
+        except AttributeError:
+            pass
 
-    # ── Footer ────────────────────────────────────────────────
+    def _on_settings_click(self):
+        if self.on_nav_change:
+            self.on_nav_change("settings")
 
-    def _build_footer(self):
-        ctk.CTkFrame(
-            self, height=1, fg_color=Colors.BG_BORDER
-        ).grid(row=7, column=0, sticky="ew")
+    # -----------------------------------------------------
+    #  Public API (kept compatible with app.py)
+    # -----------------------------------------------------
 
-        footer = ctk.CTkFrame(self, fg_color="transparent")
-        footer.grid(row=8, column=0, sticky="ew", padx=16, pady=10)
+    def add_chat(self, chat_id, title, preview="", timestamp=None,
+                 pinned=False, active=False):
+        self._chat_list.add_chat(chat_id, title, preview, timestamp, pinned, active)
 
-        ctk.CTkLabel(
-            footer,
-            text="Drex v1.0.0",
-            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.XS),
-            text_color=Colors.TEXT_MUTED,
-        ).pack(side="left")
+    def add_project(self, project_id, name, chat_count=0):
+        self._project_list.add_project(project_id, name, chat_count)
 
-    # ── Public Methods ────────────────────────────────────────
+    def add_plugin(self, plugin_id, name, description="", enabled=False):
+        self._plugin_list.add_plugin(plugin_id, name, description, enabled)
 
-    def refresh_status(self):
-        """Force-refresh AI provider status indicators."""
-        self._update_ai_status()
+    def add_download(self, download_id, filename, size="", timestamp=None):
+        self._download_list.add_download(download_id, filename, size, timestamp)
+
+    def clear_chats(self):
+        self._chat_list.clear()
+
+    def set_active_chat(self, chat_id):
+        self._chat_list.set_active(chat_id)

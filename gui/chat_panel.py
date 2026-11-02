@@ -1,325 +1,501 @@
 # ============================================================
 #  DREX - AI Desktop Assistant
-#  gui/chat_panel.py  —  Chat Message Display
+#  gui/chat_panel.py - Chat conversation display
 #
-#  WHAT IT DOES:
-#  The main chat area showing conversation history.
-#  Handles:
-#  - Rendering user and AI messages as styled bubbles
-#  - Showing typing indicator while AI is processing
-#  - Auto-scrolling to the latest message
-#  - Clearing chat history
-#  - Welcome screen on first launch
+#  Wide message area with:
+#    - Left-aligned avatar + bubble for assistant
+#    - Right-aligned bubble (accent color) for user
+#    - Timestamps, copy / retry / regenerate actions
+#    - Streaming typing indicator
+#    - Welcome screen when empty
+#
+#  SCROLL DESIGN NOTES (read this before touching scroll code again):
+#
+#  CTkScrollableFrame wraps a raw tk.Canvas (self.scroll_frame._parent_canvas)
+#  with an embedded frame window. Its scrollregion is normally kept in sync
+#  by customtkinter's own internal <Configure> binding. That works fine for
+#  simple/static content, but breaks down here because MessageBubble uses
+#  MarkdownMessage, which resizes ASYNCHRONOUSLY over several Tk idle
+#  cycles after being packed (see widgets.py _fit_height). If a scroll
+#  happens to run while customtkinter's internal bookkeeping is mid-sync,
+#  the scrollregion can be momentarily stale (too tall or too short),
+#  which is what produces "cuts off the top message" / "gap below the
+#  last message" symptoms.
+#
+#  To make this reliable without depending on any single well-timed call,
+#  THREE independent, redundant mechanisms all funnel into one function
+#  (_robust_scroll_to_bottom):
+#    1. Called directly after any structural change (add_message, typing
+#       indicator, streaming start/flush/finalize).
+#    2. Bound to <Configure> on messages_container -- fires on literally
+#       any height change of the message list, from any cause.
+#    3. A repeating series of delayed re-checks (0 / 60 / 150 / 300 / 500ms)
+#       after any "content changed" event, so even if customtkinter's
+#       internal handler runs after ours and overwrites the scrollregion,
+#       we get the last word.
+#
+#  Every one of these calls explicitly recomputes scrollregion from
+#  canvas.bbox("all") right before moving the viewport -- never trusts
+#  whatever customtkinter last set it to.
 # ============================================================
 
-import tkinter as tk
 import customtkinter as ctk
 from datetime import datetime
-from typing import Optional
-from gui.theme import Colors, Fonts, Sizing, Spacing
+import time
+from typing import Optional, Callable
+
+from gui.theme import Colors, Fonts, Sizing, Spacing, Icons
 from gui.widgets import MessageBubble, TypingIndicator, StreamingLabel
 from utils.logger import logger
 
 
 class ChatPanel(ctk.CTkFrame):
-    """
-    Scrollable chat message display area.
-    Messages appear bottom-up, newest at the bottom.
-    """
+    """Scrollable chat area — newest message at the bottom."""
 
-    def __init__(self, parent, **kwargs):
+    # Delays (ms) for the redundant post-change scroll re-checks.
+    _SCROLL_RECHECK_DELAYS = (0, 60, 150, 300, 500)
+
+    def __init__(
+        self,
+        parent,
+        on_suggestion: Optional[Callable[[str], None]] = None,
+        on_regenerate: Optional[Callable] = None,
+        **kwargs,
+    ):
         super().__init__(
             parent,
-            fg_color=Colors.BG_DARK,
+            fg_color=Colors.BG_BASE,
             corner_radius=0,
-            **kwargs
+            **kwargs,
         )
+
+        self.on_suggestion = on_suggestion
+        self.on_regenerate = on_regenerate
 
         self._message_count = 0
         self._typing_indicator: Optional[TypingIndicator] = None
         self._streaming_label: Optional[StreamingLabel] = None
         self._is_typing = False
-        self._streaming_bubble_created = False  # Tracks if finish_streaming() already made a bubble
+        self._welcome_widget = None
+
+        # Streaming token buffering (batches rapid tokens instead of
+        # re-rendering on every single one).
+        self._token_buffer = ""
+        self._last_flush = 0.0
+        self._flush_job = None
+
+        # Scroll bookkeeping
+        self._recheck_jobs = []
+        self._last_seen_height = -1
 
         self._build()
         self._show_welcome()
 
-        logger.debug("ChatPanel initialized")
+    # -----------------------------------------------------
+    #  Layout
+    # -----------------------------------------------------
 
     def _build(self):
-        """Build the scrollable chat container."""
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        # Scrollable frame — this holds all messages
         self.scroll_frame = ctk.CTkScrollableFrame(
             self,
-            fg_color=Colors.BG_DARK,
+            fg_color=Colors.BG_BASE,
             corner_radius=0,
-            scrollbar_button_color=Colors.BG_BORDER,
-            scrollbar_button_hover_color=Colors.BG_ELEVATED,
+            scrollbar_button_color=Colors.BG_OVERLAY,
+            scrollbar_button_hover_color=Colors.BORDER_LIGHT,
         )
         self.scroll_frame.grid(row=0, column=0, sticky="nsew")
         self.scroll_frame.grid_columnconfigure(0, weight=1)
 
-        # Messages are packed into this inner frame
-        self.messages_container = ctk.CTkFrame(
-            self.scroll_frame,
-            fg_color="transparent"
-        )
+        self.messages_container = ctk.CTkFrame(self.scroll_frame, fg_color="transparent")
         self.messages_container.pack(
-            fill="both",
-            expand=True,
+            fill="x",
+            expand=False,
+            anchor="n",
             padx=Sizing.CHAT_PADDING,
-            pady=Sizing.CHAT_PADDING
+            pady=Sizing.CHAT_PADDING,
         )
+
+        # Mechanism #2: catch-all resize watcher. Fires on ANY height
+        # change of the message list, no matter what caused it.
+        self.messages_container.bind("<Configure>", self._on_content_resize)
+
+    # -----------------------------------------------------
+    #  Welcome
+    # -----------------------------------------------------
 
     def _show_welcome(self):
-        """Display the welcome screen before any messages."""
-        self._welcome_frame = ctk.CTkFrame(
-            self.messages_container,
-            fg_color="transparent"
+        self._welcome_widget = ctk.CTkFrame(
+            self.messages_container, fg_color="transparent"
         )
-        self._welcome_frame.pack(fill="both", expand=True, pady=60)
-
-        # Large glowing icon
-        ctk.CTkLabel(
-            self._welcome_frame,
-            text="◈",
-            font=ctk.CTkFont(family=Fonts.PRIMARY, size=64),
-            text_color=Colors.ACCENT,
-        ).pack()
+        self._welcome_widget.pack(fill="both", expand=True, pady=(80, 40))
 
         ctk.CTkLabel(
-            self._welcome_frame,
-            text="Drex",
-            font=ctk.CTkFont(family=Fonts.DISPLAY, size=Fonts.HERO, weight="bold"),
+            self._welcome_widget,
+            text=Icons.SPARKLE,
+            width=64,
+            height=64,
+            font=ctk.CTkFont(family=Fonts.ICON, size=30),
+            fg_color=Colors.ACCENT,
+            text_color=Colors.TEXT_INVERSE,
+            corner_radius=32,
+        ).pack(pady=(0, Spacing.LG))
+
+        ctk.CTkLabel(
+            self._welcome_widget,
+            text="How can I help you today?",
+            font=ctk.CTkFont(family=Fonts.DISPLAY, size=Fonts.XXL, weight="bold"),
             text_color=Colors.TEXT_PRIMARY,
-        ).pack(pady=(8, 0))
+        ).pack(pady=(0, Spacing.SM))
 
         ctk.CTkLabel(
-            self._welcome_frame,
-            text="AI Desktop Assistant",
-            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.LG),
+            self._welcome_widget,
+            text="Ask DREX to launch apps, search the web, or answer questions.",
+            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.MD),
             text_color=Colors.TEXT_SECONDARY,
-        ).pack(pady=(4, 24))
+        ).pack(pady=(0, Spacing.XL))
 
-        # Quick action hints
-        hints_frame = ctk.CTkFrame(
-            self._welcome_frame,
-            fg_color=Colors.BG_CARD,
-            corner_radius=Sizing.RADIUS_XL,
-            border_width=1,
-            border_color=Colors.BG_BORDER,
-        )
-        hints_frame.pack(padx=80)
+        grid = ctk.CTkFrame(self._welcome_widget, fg_color="transparent")
+        grid.pack(pady=(0, 0))
+        grid.grid_columnconfigure((0, 1), weight=1, uniform="cards")
 
-        hints = [
-            ("🚀", "Open Chrome",            "Open any app instantly"),
-            ("🔍", "Search for Python tips",  "Search the web by voice"),
-            ("📸", "Take a screenshot",       "Control your PC hands-free"),
-            ("🤖", "What is machine learning?","Get AI answers on anything"),
+        suggestions = [
+            (Icons.SEARCH,  "Open Chrome",       "Launch a common application",
+             "Open Chrome"),
+            (Icons.CHAT,    "Search YouTube",    "Find music, videos, tutorials",
+             "Search YouTube for lofi music"),
+            (Icons.DOWNLOAD, "Take a screenshot", "Capture what's on your screen",
+             "Take a screenshot"),
+            (Icons.SPARKLE, "What can you do?",  "Explore DREX capabilities",
+             "What can you do?"),
         ]
 
-        for icon, example, desc in hints:
-            row = ctk.CTkFrame(hints_frame, fg_color="transparent")
-            row.pack(fill="x", padx=20, pady=8)
+        for i, (icon, title, subtitle, prompt) in enumerate(suggestions):
+            card = self._suggestion_card(grid, icon, title, subtitle, prompt)
+            card.grid(row=i // 2, column=i % 2,
+                      padx=Spacing.SM, pady=Spacing.SM, sticky="nsew")
 
-            ctk.CTkLabel(
-                row,
-                text=icon,
-                font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.LG),
-                width=32,
-            ).pack(side="left")
+    def _suggestion_card(self, parent, icon, title, subtitle, prompt):
+        card = ctk.CTkFrame(
+            parent,
+            fg_color=Colors.BG_ELEVATED,
+            border_width=1,
+            border_color=Colors.BORDER,
+            corner_radius=Sizing.RADIUS_LG,
+            width=280,
+            height=84,
+        )
+        card.grid_propagate(False)
+        card.grid_columnconfigure(1, weight=1)
 
-            text_col = ctk.CTkFrame(row, fg_color="transparent")
-            text_col.pack(side="left", padx=12, fill="x", expand=True)
+        icon_lbl = ctk.CTkLabel(
+            card,
+            text=icon,
+            width=28,
+            font=ctk.CTkFont(family=Fonts.ICON, size=16),
+            text_color=Colors.ACCENT,
+        )
+        icon_lbl.grid(row=0, column=0, rowspan=2, sticky="n",
+                      padx=(Spacing.MD, Spacing.SM), pady=(Spacing.MD, 0))
 
-            ctk.CTkLabel(
-                text_col,
-                text=f'"{example}"',
-                font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.SM, weight="bold"),
-                text_color=Colors.ACCENT,
-                anchor="w",
-            ).pack(fill="x")
+        title_lbl = ctk.CTkLabel(
+            card,
+            text=title,
+            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.MD, weight="bold"),
+            text_color=Colors.TEXT_PRIMARY,
+            anchor="w",
+        )
+        title_lbl.grid(row=0, column=1, sticky="w", padx=(0, Spacing.MD),
+                       pady=(Spacing.MD, 0))
 
-            ctk.CTkLabel(
-                text_col,
-                text=desc,
-                font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.XS),
-                text_color=Colors.TEXT_MUTED,
-                anchor="w",
-            ).pack(fill="x")
-
-        ctk.CTkLabel(
-            self._welcome_frame,
-            text="Type below or press the mic button to speak  🎤",
+        sub_lbl = ctk.CTkLabel(
+            card,
+            text=subtitle,
             font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.SM),
             text_color=Colors.TEXT_MUTED,
-        ).pack(pady=(24, 0))
+            anchor="w",
+        )
+        sub_lbl.grid(row=1, column=1, sticky="w", padx=(0, Spacing.MD),
+                     pady=(0, Spacing.MD))
 
-    def _hide_welcome(self):
-        """Remove the welcome screen when first message arrives."""
-        if hasattr(self, '_welcome_frame') and self._welcome_frame:
-            self._welcome_frame.destroy()
-            self._welcome_frame = None
+        widgets = [card, icon_lbl, title_lbl, sub_lbl]
 
-    # ── Public API ────────────────────────────────────────────
+        def _enter(_e=None):
+            card.configure(fg_color=Colors.BG_OVERLAY, border_color=Colors.BORDER_LIGHT)
 
-    def add_message(self, role: str, content: str, provider: str = ""):
-        """
-        Add a new message bubble to the chat.
+        def _leave(_e=None):
+            card.configure(fg_color=Colors.BG_ELEVATED, border_color=Colors.BORDER)
 
-        Args:
-            role:    "user" | "assistant"
-            content: Message text
-            provider: Provider name metadata (for AI messages)
-        """
-        # Remove welcome screen on first message
-        if self._message_count == 0:
-            self._hide_welcome()
+        def _click(_e=None):
+            if self.on_suggestion:
+                self.on_suggestion(prompt)
 
-        # Remove typing indicator before adding AI response
-        if role == "assistant" and self._is_typing:
-            self.hide_typing()
+        for w in widgets:
+            w.bind("<Enter>", _enter)
+            w.bind("<Leave>", _leave)
+            w.bind("<Button-1>", _click)
+            try:
+                w.configure(cursor="hand2")
+            except Exception:
+                pass
+        return card
+
+    def _dismiss_welcome(self):
+        if self._welcome_widget is not None:
+            self._welcome_widget.destroy()
+            self._welcome_widget = None
+
+    # -----------------------------------------------------
+    #  Message API
+    # -----------------------------------------------------
+
+    def add_message(self, role: str, content: str,
+                    provider: Optional[str] = None,
+                    timestamp: Optional[str] = None):
+        self._dismiss_welcome()
+        self._hide_typing_indicator()
 
         self._message_count += 1
-        timestamp = datetime.now().strftime("%I:%M %p")
+        ts = timestamp or datetime.now().strftime("%I:%M %p")
 
         bubble = MessageBubble(
             self.messages_container,
             role=role,
             content=content,
-            timestamp=timestamp,
-            provider=provider if provider else None,
+            timestamp=ts,
+            provider=provider or None,
+            on_regenerate=self._on_regenerate_callback,
         )
-        bubble.pack(fill="x", pady=(4, 4))
+        bubble.pack(fill="x", pady=(8, 10))
+        self._content_changed()
+        return bubble
 
-        # Scroll to bottom after a short delay (let widget render first)
-        self.after(50, self._scroll_to_bottom)
+    def _on_regenerate_callback(self, _content):
+        """Forward regenerate request to the app layer."""
+        if self.on_regenerate:
+            self.on_regenerate()
 
-        logger.debug(f"Message added [{role}]: {content[:40]}...")
-
+    # Legacy aliases used by app.py
     def show_typing(self):
-        """Show the 'Drex is thinking...' indicator."""
+        self.show_typing_indicator()
+
+    def hide_typing(self):
+        self._hide_typing_indicator()
+
+    def show_streaming(self, provider: str = ""):
+        self.start_streaming()
+
+    def update_streaming(self, token: str):
+        self.append_stream_token(token)
+
+    def finish_streaming(self, provider: str = "", final_text: str = ""):
+        self.finalize_streaming(provider=provider or None, final_text=final_text)
+
+    # -----------------------------------------------------
+    #  Typing / streaming
+    # -----------------------------------------------------
+
+    def show_typing_indicator(self):
         if self._is_typing:
             return
         self._is_typing = True
-        self._hide_welcome()
+        self._dismiss_welcome()
 
         self._typing_indicator = TypingIndicator(self.messages_container)
         self._typing_indicator.pack(fill="x", pady=(4, 4))
-        self._typing_indicator.start()
-        self.after(50, self._scroll_to_bottom)
+        self._content_changed()
 
-    def hide_typing(self):
-        """Remove the typing indicator."""
-        if self._typing_indicator:
-            self._typing_indicator.stop()
-            self._typing_indicator.destroy()
+    def _hide_typing_indicator(self):
+        if self._typing_indicator is not None:
+            try:
+                self._typing_indicator.destroy()
+            except Exception:
+                pass
             self._typing_indicator = None
         self._is_typing = False
 
-    # ── Streaming support ────────────────────────────────────
-
-    def show_streaming(self, provider: str = "") -> None:
-        """
-        Show a streaming label for realtime token rendering.
-        Safe to call multiple times — won't create duplicate labels.
-
-        Args:
-            provider: Optional provider name to display.
-        """
-        # Prevent duplicate streaming labels
-        if self._streaming_label and self._streaming_label.winfo_exists():
-            logger.debug("Streaming label already exists — skipping duplicate")
+    def start_streaming(self):
+        if self._streaming_label is not None:
             return
+        self._dismiss_welcome()
+        self._hide_typing_indicator()
 
-        self._hide_welcome()
-        if self._is_typing:
-            self.hide_typing()
+        self._token_buffer = ""
+        self._last_flush = time.time()
 
         self._streaming_label = StreamingLabel(
             self.messages_container,
-            provider=provider,
+            on_regenerate=(lambda c: self._on_regenerate_callback(c)) if self.on_regenerate else None,
+            on_height_settled=self._content_changed,
         )
-        self._streaming_label.pack(fill="x", pady=(4, 4))
-        self._streaming_label.start()
-        self._is_typing = True  # reuse flag to prevent double streams
-        self._streaming_bubble_created = False  # Reset for new response cycle
-        self.after(50, self._scroll_to_bottom)
-        logger.debug("Streaming label created")
+        self._streaming_label.pack(fill="x", pady=(8, 10))
+        self._is_typing = True
+        self._content_changed()
 
-    def update_streaming(self, token: str) -> None:
-        """
-        Append a token to the current streaming message.
-        Thread-safe — uses after() to schedule on main thread.
+    def append_stream_token(self, token: str):
+        if self._streaming_label is None:
+            logger.debug("Late stream token ignored.")
+            return
 
-        Args:
-            token: A partial response token to append.
-        """
-        if self._streaming_label:
-            self._streaming_label.append(token)
-            # Scroll to bottom periodically during streaming
-            self.after(10, self._scroll_to_bottom)
+        self._token_buffer += token
+        now = time.time()
 
-    def finish_streaming(self, provider: str = "") -> None:
-        """
-        Finalize the streaming message into a permanent message bubble.
-        Called when streaming is complete.
+        if len(self._token_buffer) >= 8 or (now - self._last_flush) > 0.04:
+            self._flush_tokens()
+        else:
+            if self._flush_job:
+                self.after_cancel(self._flush_job)
+            self._flush_job = self.after(50, self._flush_tokens)
 
-        Only creates a message bubble if streamed text is non-empty.
-        If empty (e.g. provider fallback without tokens), the streaming
-        label is destroyed silently — _display_response handles the fallback.
+    def _flush_tokens(self):
+        if not self._token_buffer or self._streaming_label is None:
+            return
+        try:
+            self._streaming_label.append(self._token_buffer)
+        except Exception as e:
+            logger.debug("Stream flush failed: {}", e)
+        self._token_buffer = ""
+        self._last_flush = time.time()
+        if self._flush_job:
+            self.after_cancel(self._flush_job)
+            self._flush_job = None
+        self._content_changed()
 
-        Args:
-            provider: Provider name to show in the message meta.
-        """
-        if self._streaming_label:
-            full_text = self._streaming_label.get_text()
-            self._streaming_label.stop()
-            self._streaming_label.destroy()
+    def finalize_streaming(self, provider: Optional[str] = None, final_text: str = ""):
+        if self._streaming_label is None:
+            return
+
+        self._flush_tokens()
+
+        try:
+            self._streaming_label.finalize(provider=provider, final_text=final_text)
+        except Exception as e:
+            logger.debug("Streaming finalize failed: {}", e)
+            try:
+                self._streaming_label.destroy()
+            except Exception:
+                pass
+
+        self._streaming_label = None
+        self._is_typing = False
+        self._content_changed()
+
+    def cancel_streaming(self):
+        """Discard an active streaming bubble without rendering it."""
+        if self._flush_job:
+            self.after_cancel(self._flush_job)
+            self._flush_job = None
+        self._token_buffer = ""
+        if self._streaming_label is not None:
+            try:
+                self._streaming_label.destroy()
+            except Exception:
+                pass
             self._streaming_label = None
-
-            # Only create a bubble if there's actual streamed content
-            if full_text.strip():
-                self._message_count += 1
-                timestamp = datetime.now().strftime("%I:%M %p")
-                provider_label = f"via {provider}" if provider else ""
-
-                bubble = MessageBubble(
-                    self.messages_container,
-                    role="assistant",
-                    content=full_text,
-                    timestamp=timestamp,
-                    provider=provider_label,
-                )
-                bubble.pack(fill="x", pady=(4, 4))
-                self.after(50, self._scroll_to_bottom)
-                self._streaming_bubble_created = True  # Mark bubble as created
-                logger.debug("Streaming bubble created (len={})", len(full_text))
-            else:
-                logger.debug("Streaming label had no text — no bubble created")
-
         self._is_typing = False
 
+    # -----------------------------------------------------
+    #  Utilities
+    # -----------------------------------------------------
+
     def clear_messages(self):
-        """Remove all messages from the chat."""
         for widget in self.messages_container.winfo_children():
             widget.destroy()
         self._message_count = 0
         self._is_typing = False
         self._typing_indicator = None
+        self._streaming_label = None
+        self._token_buffer = ""
+        self._last_flush = 0.0
+        if self._flush_job:
+            self.after_cancel(self._flush_job)
+            self._flush_job = None
+        for job in self._recheck_jobs:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+        self._recheck_jobs = []
+        self._last_seen_height = -1
         self._show_welcome()
-        logger.info("Chat cleared")
+        self._scroll_to_top()
 
-    def _scroll_to_bottom(self):
-        """Scroll the chat view to show the latest message."""
+    # -----------------------------------------------------
+    #  Scroll — see module docstring for the overall design
+    # -----------------------------------------------------
+
+    def _on_content_resize(self, event):
+        """Mechanism #2: fires on any height change of the message list."""
+        if event.height == self._last_seen_height:
+            return
+        self._last_seen_height = event.height
+        self._content_changed()
+
+    def _content_changed(self):
+        """Central entry point: call this any time the message list's
+        content changed in a way that might require scrolling.
+
+        Triggers an immediate scroll attempt plus a staggered series of
+        re-checks (mechanism #3), so that even if MarkdownMessage's async
+        height-fitting or customtkinter's own internal scrollregion sync
+        finishes later, we still land in the right place afterward.
+        """
+        for job in self._recheck_jobs:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+        self._recheck_jobs = []
+
+        for delay in self._SCROLL_RECHECK_DELAYS:
+            job = self.after(delay, self._robust_scroll_to_bottom)
+            self._recheck_jobs.append(job)
+
+    def _robust_scroll_to_bottom(self):
+        """The one function everything funnels into. Always recomputes
+        scrollregion from the real, current content bounds before moving
+        the viewport -- never trusts whatever customtkinter last set
+        scrollregion to."""
         try:
-            self.scroll_frame._parent_canvas.yview_moveto(1.0)
+            self.messages_container.update_idletasks()
+            self.scroll_frame.update_idletasks()
+
+            canvas = self.scroll_frame._parent_canvas
+            canvas.update_idletasks()
+
+            bbox = canvas.bbox("all")
+            if bbox:
+                canvas.configure(scrollregion=bbox)
+
+            canvas.yview_moveto(1.0)
+        except Exception as e:
+            logger.debug(f"Auto-scroll failed: {e}")
+
+    # Kept for any external caller still using the old name/signature
+    # (e.g. app.py calling chat_panel._scroll_to_bottom(force=True)).
+    def _scroll_to_bottom(self, force: bool = False):
+        self._robust_scroll_to_bottom()
+
+    def _scroll_to_top(self):
+        try:
+            canvas = self.scroll_frame._parent_canvas
+            canvas.update_idletasks()
+            bbox = canvas.bbox("all")
+            if bbox:
+                canvas.configure(scrollregion=bbox)
+            canvas.yview_moveto(0.0)
         except Exception:
             pass
 
     @property
     def message_count(self) -> int:
         return self._message_count
+
+    def get_last_user_message(self) -> str:
+        """Return the last user message content for regenerate support."""
+        for child in reversed(self.messages_container.winfo_children()):
+            if isinstance(child, MessageBubble) and child.role == "user":
+                return child.content
+        return ""

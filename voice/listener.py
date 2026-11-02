@@ -7,6 +7,7 @@ Provides:
   - Thread-safe lifecycle management
   - VAD integration (optional, via voice/vad.py)
   - Graceful shutdown support
+  - Post-processing for better transcription accuracy
 
 Key improvements over previous version:
   ✓ Thread does NOT die silently
@@ -17,8 +18,10 @@ Key improvements over previous version:
   ✓ Stable background listening loop
   ✓ No repeated listener recreation (single persistent thread)
   ✓ No infinite restart spam (configurable max restarts)
+  ✓ Post-processing pipeline for transcription quality
 """
 
+import re
 import threading
 import queue
 import time
@@ -155,7 +158,7 @@ class Listener:
             text = self._recognizer.recognize_google(
                 audio, language=self.cfg.language
             )
-            return text.strip()
+            return self._clean_transcription(text)
         except sr.UnknownValueError:
             logger.debug("Could not understand audio")
             return None
@@ -167,6 +170,124 @@ class Listener:
                 return self._recognizer.recognize_sphinx(audio)
             except Exception:
                 return None
+
+    # ──────────────────────────────────────────────────────────
+    #  POST-PROCESSING PIPELINE
+    # ──────────────────────────────────────────────────────────
+
+    # Common Google STT mistakes and their corrections
+    _CORRECTIONS = {
+        r"\bhi\b\s*,\s*(\w)": lambda m: f"Hi, {m.group(1).upper()}",
+        r"\bim\b": "I'm",
+        r"\bi'm\b": "I'm",
+        r"\bive\b": "I've",
+        r"\bi've\b": "I've",
+        r"\bdont\b": "don't",
+        r"\bwont\b": "won't",
+        r"\bcant\b": "can't",
+        r"\bwasnt\b": "wasn't",
+        r"\bwerent\b": "weren't",
+        r"\bdidnt\b": "didn't",
+        r"\bhasnt\b": "hasn't",
+        r"\bhavent\b": "haven't",
+        r"\bhadnt\b": "hadn't",
+        r"\bcouldnt\b": "couldn't",
+        r"\bwouldnt\b": "wouldn't",
+        r"\bshouldnt\b": "shouldn't",
+        r"\btheres\b": "there's",
+        r"\bthats\b": "that's",
+        r"\bwhats\b": "what's",
+        r"\bwheres\b": "where's",
+        r"\bwhos\b": "who's",
+        r"\blets\b": "let's",
+        r"\bheres\b": "here's",
+        r"\byoure\b": "you're",
+        r"\byouve\b": "you've",
+        r"\bhes\b(?!\s*(?:a\b|the\b|going|got|been|told|said))": "he's",
+        r"\btodays\b": "today's",
+        r"\bhowre\b": "how're",
+        r"\bare\s+you\b": "are you",
+        r"\bare\s+we\b": "are we",
+        r"\bare\s+they\b": "are they",
+        r"\bno 1\b": "no one",
+        r"\bok\b": "OK",
+        r"\bwifi\b": "Wi-Fi",
+        r"\bWiFi\b": "Wi-Fi",
+        r"\bwld\b": "would",
+        r"\bcn\b(?:\s|$)": "can ",
+        r"\bshd\b": "should",
+        r"\bpls\b": "please",
+        r"\bthx\b": "thanks",
+        r"\bu\b(?:\s|$)": "you ",
+        r"\br\b(?:\s|$)": "are ",
+        r"\bDrexel\b": "DREX",
+        r"\bdrex\b": "DREX",
+        r"\bDrex\b": "DREX",
+        r"\bGemini\b": "Gemini",
+        r"\bgemini\b": "Gemini",
+        r"\bChatGPT\b": "ChatGPT",
+        r"\bchat gpt\b": "ChatGPT",
+        r"\bClaude\b": "Claude",
+        r"\bclaude\b": "Claude",
+        r"\bOpenAI\b": "OpenAI",
+        r"\bopenai\b": "OpenAI",
+        r"\bGitHub\b": "GitHub",
+        r"\bgithub\b": "GitHub",
+        r"\bPython\b": "Python",
+        r"\bpython\b": "Python",
+        r"\bJavaScript\b": "JavaScript",
+        r"\bjavascript\b": "JavaScript",
+        r"\bvs code\b": "VS Code",
+        r"\bLLM\b": "LLM",
+        r"\bllm\b": "LLM",
+        r"\bAPI\b": "API",
+        r"\bapi\b": "API",
+    }
+
+    # Voice command patterns that need sentence-ending punctuation
+    _QUESTION_WORDS = {"what", "how", "why", "where", "when", "who", "which",
+                       "can", "could", "would", "will", "should", "is", "are",
+                       "do", "does", "did", "have", "has", "was", "were"}
+
+    def _clean_transcription(self, text: str) -> str:
+        """Apply post-processing corrections to improve STT accuracy."""
+        if not text:
+            return text
+
+        text = text.strip()
+
+        # Apply pattern corrections
+        for pattern, replacement in self._CORRECTIONS.items():
+            try:
+                if callable(replacement):
+                    text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+                else:
+                    text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+            except Exception:
+                pass
+
+        # Capitalize first letter
+        if text and text[0].islower():
+            text = text[0].upper() + text[1:]
+
+        # Fix double/missing spaces
+        text = re.sub(r"  +", " ", text)
+
+        # Add ending punctuation if missing (improves TTS phrasing)
+        if text and not text[-1] in ".!?":
+            words = text.lower().split()
+            if words and words[0] in self._QUESTION_WORDS:
+                text += "?"
+            elif len(words) > 3:
+                text += "."
+
+        # Capitalize "I" anywhere in the text
+        text = re.sub(r"\bi\b(?=([^']|$))", "I", text)
+
+        # Ensure proper names after "I'm" stay capitalized
+        text = re.sub(r"I['']m ([a-z])", lambda m: f"I'm {m.group(1).upper()}", text)
+
+        return text
 
     # ──────────────────────────────────────────────────────────
     #  RESILIENT CONTINUOUS LISTENING

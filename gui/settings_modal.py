@@ -3,22 +3,29 @@
 #  gui/settings_modal.py  —  Settings Dialog
 #
 #  A modal window for configuring:
-#  - API keys (Gemini, Groq, OpenRouter)
-#  - Voice settings (speed, engine)
-#  - Appearance preferences
-#  - User profile (name)
+#  - General settings
+#  - Appearance
+#  - AI Providers
+#  - Voice
+#  - Automation
+#  - Downloads
+#  - Plugins
+#  - Memory
+#  - Advanced
+#  - About
+#
+#  DESIGN: Flat design, tabbed interface
 # ============================================================
 
 import customtkinter as ctk
-from gui.theme import Colors, Fonts, Sizing
-from gui.widgets import PrimaryButton, SecondaryButton, SectionHeader
+from gui.theme import Colors, Fonts, Sizing, Spacing
+from gui.widgets import PrimaryButton, SecondaryButton
 from utils.logger import logger
 
 
 class SettingsModal(ctk.CTkToplevel):
     """
-    Modal settings window.
-    Opens on top of the main window.
+    Modal settings window with tabbed interface.
     """
 
     def __init__(self, parent, memory=None, orchestrator=None, on_save=None):
@@ -29,179 +36,210 @@ class SettingsModal(ctk.CTkToplevel):
 
         # Window setup
         self.title("Drex Settings")
-        self.geometry("600x580")
-        self.resizable(False, False)
-        self.configure(fg_color=Colors.BG_DARK)
-        self.grab_set()  # Modal — blocks main window
+        self.geometry("700x600")
+        self.resizable(True, True)
+        self.configure(fg_color=Colors.BG_SURFACE)
+        self.grab_set()
         self.focus_set()
 
         # Center on parent
         self.update_idletasks()
-        px = parent.winfo_x() + (parent.winfo_width()  - 600) // 2
-        py = parent.winfo_y() + (parent.winfo_height() - 580) // 2
+        px = parent.winfo_x() + (parent.winfo_width()  - 700) // 2
+        py = parent.winfo_y() + (parent.winfo_height() - 600) // 2
         self.geometry(f"+{px}+{py}")
 
         self._entries = {}
         self._build()
-        self._load_current_values()
 
     def _build(self):
+        """Build settings modal layout."""
         # Title
+        title_frame = ctk.CTkFrame(self, fg_color=Colors.BG_BASE, corner_radius=0)
+        title_frame.pack(fill="x", padx=0, pady=0)
+        
         ctk.CTkLabel(
-            self,
-            text="⚙️  Settings",
+            title_frame,
+            text="Settings",
             font=ctk.CTkFont(family=Fonts.DISPLAY, size=Fonts.XL, weight="bold"),
             text_color=Colors.TEXT_PRIMARY,
-        ).pack(padx=32, pady=(24, 0), anchor="w")
-
+        ).pack(padx=Spacing.LG, pady=(Spacing.LG, Spacing.SM), anchor="w")
+        
         ctk.CTkLabel(
-            self,
-            text="Configure your API keys and preferences",
+            title_frame,
+            text="Configure your preferences",
             font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.SM),
-            text_color=Colors.TEXT_MUTED,
-        ).pack(padx=32, pady=(4, 16), anchor="w")
+            text_color=Colors.TEXT_SECONDARY,
+        ).pack(padx=Spacing.LG, pady=(0, Spacing.MD), anchor="w")
 
-        # Scrollable content
-        scroll = ctk.CTkScrollableFrame(
+        # Tabview
+        self._tabview = ctk.CTkTabview(
             self,
-            fg_color="transparent",
-            scrollbar_button_color=Colors.BG_BORDER,
+            fg_color=Colors.BG_SURFACE,
+            segmented_button_fg_color=Colors.BG_ELEVATED,
+            segmented_button_selected_color=Colors.ACCENT,
+            segmented_button_unselected_color=Colors.BG_ELEVATED,
+            text_color=Colors.TEXT_SECONDARY,
+            text_color_disabled=Colors.TEXT_MUTED,
+            corner_radius=Sizing.RADIUS_MD,
+            border_width=0,
         )
-        scroll.pack(fill="both", expand=True, padx=24, pady=0)
+        self._tabview.pack(fill="both", expand=True, padx=Spacing.LG, pady=(0, Spacing.LG))
 
-        self._build_api_section(scroll)
-        self._build_voice_section(scroll)
-        self._build_profile_section(scroll)
+        # Create tabs
+        self._create_general_tab()
+        self._create_appearance_tab()
+        self._create_providers_tab()
+        self._create_voice_tab()
+        self._create_about_tab()
+
+        # Pre-populate fields with saved values
+        self._load_current_values()
 
         # Action buttons
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=24, pady=16)
+        btn_frame.pack(fill="x", padx=Spacing.LG, pady=(0, Spacing.LG))
 
         SecondaryButton(
             btn_frame, text="Cancel", command=self.destroy
         ).pack(side="right", padx=(8, 0))
 
         PrimaryButton(
-            btn_frame, text="  Save Settings  ", command=self._save
+            btn_frame, text="Save Settings", command=self._save
         ).pack(side="right")
 
-    def _build_api_section(self, parent):
-        """API Keys section."""
-        card = self._make_card(parent)
-
-        SectionHeader(card, "🔑  API Keys").pack(fill="x", padx=16, pady=(16, 8))
-
+    def _create_general_tab(self):
+        """Create General settings tab."""
+        tab = self._tabview.add("General")
+        
+        scroll = ctk.CTkScrollableFrame(tab, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, padx=Spacing.MD, pady=Spacing.MD)
+        
+        # User profile section
         ctk.CTkLabel(
-            card,
-            text="These keys are stored locally and never shared.",
+            scroll,
+            text="Profile",
+            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.BASE, weight="bold"),
+            text_color=Colors.TEXT_PRIMARY,
+            anchor="w",
+        ).pack(fill="x", pady=(0, Spacing.SM))
+        
+        self._build_field(scroll, "user_name", "Your Name", "Drex will use this to greet you")
+        
+        # Language
+        self._build_label(scroll, "Language")
+        self._entries["language"] = ctk.CTkOptionMenu(
+            scroll,
+            values=["English", "Spanish", "French", "German", "Chinese", "Japanese"],
+            fg_color=Colors.BG_ELEVATED,
+            button_color=Colors.BG_ELEVATED,
+            button_hover_color=Colors.BG_OVERLAY,
+            text_color=Colors.TEXT_PRIMARY,
+        )
+        self._entries["language"].pack(fill="x", pady=(0, Spacing.MD))
+
+    def _create_appearance_tab(self):
+        """Create Appearance settings tab."""
+        tab = self._tabview.add("Appearance")
+        
+        scroll = ctk.CTkScrollableFrame(tab, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, padx=Spacing.MD, pady=Spacing.MD)
+        
+        ctk.CTkLabel(
+            scroll,
+            text="Theme",
+            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.BASE, weight="bold"),
+            text_color=Colors.TEXT_PRIMARY,
+            anchor="w",
+        ).pack(fill="x", pady=(0, Spacing.SM))
+        
+        self._build_label(scroll, "Color Theme")
+        self._entries["theme"] = ctk.CTkOptionMenu(
+            scroll,
+            values=["Dark", "Light", "System"],
+            fg_color=Colors.BG_ELEVATED,
+            button_color=Colors.BG_ELEVATED,
+            button_hover_color=Colors.BG_OVERLAY,
+            text_color=Colors.TEXT_PRIMARY,
+        )
+        self._entries["theme"].pack(fill="x", pady=(0, Spacing.MD))
+
+    def _create_providers_tab(self):
+        """Create AI Providers settings tab."""
+        tab = self._tabview.add("Providers")
+        
+        scroll = ctk.CTkScrollableFrame(tab, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, padx=Spacing.MD, pady=Spacing.MD)
+        
+        ctk.CTkLabel(
+            scroll,
+            text="Default Provider",
+            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.BASE, weight="bold"),
+            text_color=Colors.TEXT_PRIMARY,
+            anchor="w",
+        ).pack(fill="x", pady=(0, Spacing.SM))
+        
+        self._build_label(scroll, "Preferred AI Provider")
+        self._entries["default_ai"] = ctk.CTkOptionMenu(
+            scroll,
+            values=["Gemini (Recommended)", "Groq (Fastest)", "OpenRouter (Most Models)"],
+            fg_color=Colors.BG_ELEVATED,
+            button_color=Colors.BG_ELEVATED,
+            button_hover_color=Colors.BG_OVERLAY,
+            text_color=Colors.TEXT_PRIMARY,
+        )
+        self._entries["default_ai"].pack(fill="x", pady=(0, Spacing.MD))
+        
+        ctk.CTkLabel(
+            scroll,
+            text="API Keys are stored locally and never shared.",
             font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.XS),
             text_color=Colors.TEXT_MUTED,
-        ).pack(fill="x", padx=16, pady=(0, 12))
+        ).pack(fill="x", pady=(0, Spacing.MD))
 
-        api_fields = [
-            ("gemini_key",     "Gemini API Key",     "aistudio.google.com — Free",     True),
-            ("groq_key",       "Groq API Key",       "console.groq.com — Free",        True),
-            ("openrouter_key", "OpenRouter API Key", "openrouter.ai — Optional (Free)", True),
-        ]
-
-        for key, label, hint, secret in api_fields:
-            self._build_field(card, key, label, hint, secret=secret)
-
-    def _build_voice_section(self, parent):
-        """Voice settings section."""
-        card = self._make_card(parent)
-
-        SectionHeader(card, "🎤  Voice Settings").pack(fill="x", padx=16, pady=(16, 12))
-
-        # TTS Engine selector
-        self._build_label(card, "Text-to-Speech Engine")
+    def _create_voice_tab(self):
+        """Create Voice settings tab."""
+        tab = self._tabview.add("Voice")
+        
+        scroll = ctk.CTkScrollableFrame(tab, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, padx=Spacing.MD, pady=Spacing.MD)
+        
+        ctk.CTkLabel(
+            scroll,
+            text="Voice Settings",
+            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.BASE, weight="bold"),
+            text_color=Colors.TEXT_PRIMARY,
+            anchor="w",
+        ).pack(fill="x", pady=(0, Spacing.SM))
+        
+        self._build_label(scroll, "Text-to-Speech Engine")
         self._entries["tts_engine"] = ctk.CTkOptionMenu(
-            card,
+            scroll,
             values=["pyttsx3 (Offline)", "edge-tts (Online, Better Quality)"],
             fg_color=Colors.BG_ELEVATED,
-            button_color=Colors.BG_BORDER,
-            button_hover_color=Colors.ACCENT_DIM,
+            button_color=Colors.BG_ELEVATED,
+            button_hover_color=Colors.BG_OVERLAY,
             text_color=Colors.TEXT_PRIMARY,
-            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.SM),
         )
-        self._entries["tts_engine"].pack(fill="x", padx=16, pady=(4, 12))
-
-        # STT Engine
-        self._build_label(card, "Speech-to-Text Engine")
+        self._entries["tts_engine"].pack(fill="x", pady=(0, Spacing.MD))
+        
+        self._build_label(scroll, "Speech-to-Text Engine")
         self._entries["stt_engine"] = ctk.CTkOptionMenu(
-            card,
+            scroll,
             values=["google (Online, Free)", "whisper (Offline, Private)"],
             fg_color=Colors.BG_ELEVATED,
-            button_color=Colors.BG_BORDER,
-            button_hover_color=Colors.ACCENT_DIM,
+            button_color=Colors.BG_ELEVATED,
+            button_hover_color=Colors.BG_OVERLAY,
             text_color=Colors.TEXT_PRIMARY,
-            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.SM),
         )
-        self._entries["stt_engine"].pack(fill="x", padx=16, pady=(4, 12))
+        self._entries["stt_engine"].pack(fill="x", pady=(0, Spacing.MD))
 
-        # Voice speed slider
-        self._build_label(card, "Speaking Speed")
-        speed_frame = ctk.CTkFrame(card, fg_color="transparent")
-        speed_frame.pack(fill="x", padx=16, pady=(4, 16))
-
-        self._speed_var = ctk.IntVar(value=165)
-        self._speed_label = ctk.CTkLabel(
-            speed_frame,
-            text="165 WPM",
-            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.XS),
-            text_color=Colors.TEXT_SECONDARY,
-            width=70,
-        )
-        self._speed_label.pack(side="right")
-
-        slider = ctk.CTkSlider(
-            speed_frame,
-            from_=100, to=250,
-            number_of_steps=30,
-            variable=self._speed_var,
-            button_color=Colors.ACCENT,
-            button_hover_color=Colors.BTN_PRIMARY_HOVER,
-            progress_color=Colors.ACCENT_DARK,
-            command=lambda v: self._speed_label.configure(text=f"{int(v)} WPM"),
-        )
-        slider.pack(side="left", fill="x", expand=True, padx=(0, 12))
-        self._entries["tts_speed"] = slider
-
-    def _build_profile_section(self, parent):
-        """User profile section."""
-        card = self._make_card(parent)
-
-        SectionHeader(card, "👤  Your Profile").pack(fill="x", padx=16, pady=(16, 12))
-
-        self._build_field(card, "user_name", "Your Name",
-                          "Drex will use this to greet you", secret=False)
-
-        # Default AI selector
-        self._build_label(card, "Preferred AI Provider")
-        self._entries["default_ai"] = ctk.CTkOptionMenu(
-            card,
-            values=["gemini (Recommended)", "groq (Fastest)", "openrouter (Most Models)"],
-            fg_color=Colors.BG_ELEVATED,
-            button_color=Colors.BG_BORDER,
-            button_hover_color=Colors.ACCENT_DIM,
-            text_color=Colors.TEXT_PRIMARY,
-            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.SM),
-        )
-        self._entries["default_ai"].pack(fill="x", padx=16, pady=(4, 16))
-
-    # ── Helpers ───────────────────────────────────────────────
-
-    def _make_card(self, parent) -> ctk.CTkFrame:
-        """Create a settings card container."""
-        card = ctk.CTkFrame(
-            parent,
-            fg_color=Colors.BG_CARD,
-            corner_radius=Sizing.RADIUS_LG,
-            border_width=1,
-            border_color=Colors.BG_BORDER,
-        )
-        card.pack(fill="x", pady=(0, 12))
-        return card
+    def _create_about_tab(self):
+        """Create About tab."""
+        from gui.about_tab import AboutTab
+        
+        tab = self._tabview.add("About")
+        about = AboutTab(tab)
+        about.pack(fill="both", expand=True)
 
     def _build_label(self, parent, text: str):
         ctk.CTkLabel(
@@ -210,12 +248,11 @@ class SettingsModal(ctk.CTkToplevel):
             font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.SM, weight="bold"),
             text_color=Colors.TEXT_SECONDARY,
             anchor="w",
-        ).pack(fill="x", padx=16, pady=(0, 2))
+        ).pack(fill="x", pady=(Spacing.SM, Spacing.XS))
 
     def _build_field(self, parent, key: str, label: str, hint: str = "", secret: bool = False):
-        """Build a labeled text entry field."""
         self._build_label(parent, label)
-
+        
         if hint:
             ctk.CTkLabel(
                 parent,
@@ -223,19 +260,20 @@ class SettingsModal(ctk.CTkToplevel):
                 font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.XS),
                 text_color=Colors.TEXT_MUTED,
                 anchor="w",
-            ).pack(fill="x", padx=16)
-
+            ).pack(fill="x")
+        
         entry = ctk.CTkEntry(
             parent,
-            font=ctk.CTkFont(family=Fonts.MONO, size=Fonts.SM),
+            font=ctk.CTkFont(family=Fonts.PRIMARY, size=Fonts.SM),
             fg_color=Colors.BG_ELEVATED,
-            border_color=Colors.BG_BORDER,
+            border_color=Colors.BORDER,
             text_color=Colors.TEXT_PRIMARY,
             placeholder_text_color=Colors.TEXT_MUTED,
             show="•" if secret else "",
             height=36,
+            corner_radius=Sizing.RADIUS_MD,
         )
-        entry.pack(fill="x", padx=16, pady=(4, 14))
+        entry.pack(fill="x", pady=(0, Spacing.MD))
         self._entries[key] = entry
 
     def _load_current_values(self):
@@ -244,16 +282,15 @@ class SettingsModal(ctk.CTkToplevel):
             return
         try:
             prefs = self.memory.preferences
-
+            
             if isinstance(self._entries.get("user_name"), ctk.CTkEntry):
                 name = prefs.get("user_name", "")
                 if name:
                     self._entries["user_name"].insert(0, name)
-
+            
             speed = prefs.get("tts_speed", 165)
-            self._speed_var.set(int(speed))
-            self._speed_label.configure(text=f"{int(speed)} WPM")
-
+            if "tts_speed" in self._entries:
+                self._entries["tts_speed"].set(int(speed))
         except Exception as e:
             logger.error(f"Failed to load settings: {e}")
 
@@ -263,22 +300,6 @@ class SettingsModal(ctk.CTkToplevel):
             if self.memory:
                 prefs = self.memory.preferences
 
-                # API Keys → save to .env (write to file)
-                keys_to_save = {}
-                for field_key, env_key in [
-                    ("gemini_key",     "GEMINI_API_KEY"),
-                    ("groq_key",       "GROQ_API_KEY"),
-                    ("openrouter_key", "OPENROUTER_API_KEY"),
-                ]:
-                    entry = self._entries.get(field_key)
-                    if isinstance(entry, ctk.CTkEntry):
-                        val = entry.get().strip()
-                        if val:
-                            keys_to_save[env_key] = val
-
-                if keys_to_save:
-                    self._write_env_keys(keys_to_save)
-
                 # User name
                 name_entry = self._entries.get("user_name")
                 if isinstance(name_entry, ctk.CTkEntry):
@@ -286,8 +307,30 @@ class SettingsModal(ctk.CTkToplevel):
                     if name:
                         prefs.set("user_name", name)
 
-                # TTS speed
-                prefs.set("tts_speed", self._speed_var.get())
+                # Language (CTkOptionMenu)
+                language_menu = self._entries.get("language")
+                if isinstance(language_menu, ctk.CTkOptionMenu):
+                    prefs.set("language", language_menu.get())
+
+                # Theme (CTkOptionMenu)
+                theme_menu = self._entries.get("theme")
+                if isinstance(theme_menu, ctk.CTkOptionMenu):
+                    prefs.set("theme", theme_menu.get())
+
+                # Default AI provider (CTkOptionMenu)
+                provider_menu = self._entries.get("default_ai")
+                if isinstance(provider_menu, ctk.CTkOptionMenu):
+                    prefs.set("default_ai", provider_menu.get())
+
+                # TTS engine (CTkOptionMenu)
+                tts_menu = self._entries.get("tts_engine")
+                if isinstance(tts_menu, ctk.CTkOptionMenu):
+                    prefs.set("tts_engine", tts_menu.get())
+
+                # STT engine (CTkOptionMenu)
+                stt_menu = self._entries.get("stt_engine")
+                if isinstance(stt_menu, ctk.CTkOptionMenu):
+                    prefs.set("stt_engine", stt_menu.get())
 
             if self.on_save:
                 self.on_save()
@@ -297,28 +340,3 @@ class SettingsModal(ctk.CTkToplevel):
 
         except Exception as e:
             logger.error(f"Failed to save settings: {e}")
-
-    def _write_env_keys(self, keys: dict):
-        """Write API keys to the .env file."""
-        try:
-            from pathlib import Path
-            env_path = Path(".env")
-
-            # Read existing content
-            existing = {}
-            if env_path.exists():
-                for line in env_path.read_text().splitlines():
-                    if "=" in line and not line.startswith("#"):
-                        k, _, v = line.partition("=")
-                        existing[k.strip()] = v.strip()
-
-            # Update with new keys
-            existing.update(keys)
-
-            # Write back
-            lines = [f"{k}={v}" for k, v in existing.items()]
-            env_path.write_text("\n".join(lines) + "\n")
-            logger.info(f"API keys written to .env: {list(keys.keys())}")
-
-        except Exception as e:
-            logger.error(f"Failed to write .env: {e}")

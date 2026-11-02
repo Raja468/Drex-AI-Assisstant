@@ -20,6 +20,7 @@ import os
 import queue
 import tempfile
 import threading
+import uuid
 from typing import Optional
 
 from loguru import logger
@@ -75,6 +76,11 @@ class Speaker:
     # ──────────────────────────────────────────────────────────
     #  ENGINE INITIALISATION
     # ──────────────────────────────────────────────────────────
+
+    @property
+    def is_speaking(self) -> bool:
+        """Whether the speaker is currently producing audio output."""
+        return self._speaking
 
     def _init_pyttsx3(self):
         """Initialise the pyttsx3 engine (called once at startup)."""
@@ -196,8 +202,8 @@ class Speaker:
         Saves audio to a temp file, then plays it with pygame.
         Supports interruption via stop().
 
-        HARDENING: pygame.mixer.music is checked each loop iteration
-        for stop events, allowing near-instant interruption.
+        HARDENING: Unique temp filename per call (UUID-based, not thread-id),
+        pygame initialized once at instance level, not per sentence.
         """
         if not self._check_edge_available():
             logger.warning("edge-tts not available, cannot speak with edge engine")
@@ -205,8 +211,7 @@ class Speaker:
 
         import edge_tts
 
-        # Generate a unique temp file name
-        tmp_file = os.path.join(_TEMP_DIR, f"drex_tts_{threading.get_ident()}.mp3")
+        tmp_file = os.path.join(_TEMP_DIR, f"drex_tts_{uuid.uuid4().hex[:8]}.mp3")
 
         async def _do_tts():
             communicate = edge_tts.Communicate(
@@ -217,7 +222,6 @@ class Speaker:
             )
             await communicate.save(tmp_file)
 
-        # Run the async edge-tts call synchronously
         loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(loop)
@@ -225,27 +229,24 @@ class Speaker:
         finally:
             loop.close()
 
-        # Play the generated audio file (blocks) via pygame with interrupt support
         if os.path.exists(tmp_file):
             try:
                 import pygame
-                pygame.mixer.init()
+                if not pygame.mixer.get_init():
+                    pygame.mixer.init()
                 pygame.mixer.music.load(tmp_file)
                 pygame.mixer.music.play()
-                # Poll playback status + interrupt event for responsive stop
                 while pygame.mixer.music.get_busy():
                     if self._interrupt_event.wait(timeout=0.05):
                         pygame.mixer.music.stop()
                         break
-                pygame.mixer.quit()
             except Exception as e:
                 logger.error("pygame playback failed: {}", e)
-                raise
             finally:
                 try:
                     os.remove(tmp_file)
                 except PermissionError:
-                    logger.warning("Could not remove temp TTS file: {}", tmp_file)
+                    pass
 
     # ──────────────────────────────────────────────────────────
     #  PUBLIC API
@@ -271,6 +272,134 @@ class Speaker:
         """Speak immediately on the calling thread (blocks until done)."""
         clean = self._clean_text(text)
         self._speak_sync(clean)
+
+    # ──────────────────────────────────────────────────────────
+    #  SENTENCE-LEVEL STREAMING TTS
+    # ──────────────────────────────────────────────────────────
+
+    async def speak_stream(self, text_generator):
+        """
+        Accepts an async generator of text chunks.
+        Accumulates chunks until a natural break point is detected
+        (sentence end, comma/pause, or force-flush threshold).
+
+        Speak each chunk immediately in a separate thread so the
+        token stream is not blocked by TTS synthesis.
+
+        Latency optimizations:
+          - First sentence flushed at MIN_FIRST_CHARS (25 chars) to reduce time-to-first-audio
+          - Commas/semicolons treated as early flush points for natural pacing
+          - MAX_BUFFER_SIZE=150 prevents silence gaps on long sentences
+          - Timer-based flush (MAX_WAIT_MS) prevents indefinite buffering
+
+        Args:
+            text_generator: An async iterator yielding text chunks (strings).
+        """
+        import re as _re
+        import time as _time
+
+        MIN_FIRST_CHARS = 25
+        MAX_BUFFER_SIZE = 150
+        MAX_WAIT_MS = 600
+        FIRST_FLUSH_MS = 300
+
+        buffer = ""
+        sentence_end = _re.compile(r'[.!?\n]')
+        natural_break = _re.compile(r'[,;:]')
+        first_sentence_sent = False
+        last_flush_time = _time.monotonic()
+
+        async for chunk in text_generator:
+            if not chunk:
+                continue
+            buffer += chunk
+            now = _time.monotonic()
+
+            while True:
+                match = sentence_end.search(buffer)
+                if match:
+                    idx = match.end()
+                    sentence = buffer[:idx].strip()
+                    buffer = buffer[idx:]
+                    if sentence:
+                        logger.info("🗣️ Speaking: {}...", sentence[:60])
+                        threading.Thread(target=self._speak_sync, args=(sentence,), daemon=True).start()
+                        first_sentence_sent = True
+                        last_flush_time = now
+                    continue
+
+                if not first_sentence_sent and len(buffer) >= MIN_FIRST_CHARS:
+                    nb = natural_break.search(buffer)
+                    if nb:
+                        idx = nb.end()
+                        sentence = buffer[:idx].strip()
+                        buffer = buffer[idx:]
+                        if sentence:
+                            logger.info("🗣️ Early flush: {}...", sentence[:60])
+                            threading.Thread(target=self._speak_sync, args=(sentence,), daemon=True).start()
+                            first_sentence_sent = True
+                            last_flush_time = now
+                        continue
+                    elif len(buffer) >= MAX_BUFFER_SIZE:
+                        sentence = buffer.rstrip()
+                        buffer = ""
+                        if sentence:
+                            logger.info("🗣️ Max-buffer flush: {}...", sentence[:60])
+                            threading.Thread(target=self._speak_sync, args=(sentence,), daemon=True).start()
+                            first_sentence_sent = True
+                            last_flush_time = now
+                        continue
+
+                    # Timer-based first flush
+                    elapsed = (now - last_flush_time) * 1000
+                    if buffer and not first_sentence_sent and elapsed >= FIRST_FLUSH_MS:
+                        sentence = buffer.rstrip()
+                        buffer = ""
+                        if sentence:
+                            logger.info("🗣️ Timer flush: {}...", sentence[:60])
+                            threading.Thread(target=self._speak_sync, args=(sentence,), daemon=True).start()
+                            first_sentence_sent = True
+                            last_flush_time = now
+                        continue
+                    break
+
+                natural = natural_break.search(buffer)
+                if natural:
+                    idx = natural.end()
+                    sentence = buffer[:idx].strip()
+                    buffer = buffer[idx:]
+                    if sentence and len(sentence) > 15:
+                        logger.info("🗣️ Phrase: {}...", sentence[:60])
+                        threading.Thread(target=self._speak_sync, args=(sentence,), daemon=True).start()
+                        last_flush_time = now
+                    continue
+
+                if len(buffer) >= MAX_BUFFER_SIZE:
+                    sentence = buffer.rstrip()
+                    buffer = ""
+                    if sentence:
+                        logger.info("🗣️ Flush: {}...", sentence[:60])
+                        threading.Thread(target=self._speak_sync, args=(sentence,), daemon=True).start()
+                        last_flush_time = now
+                    continue
+
+                if buffer and first_sentence_sent:
+                    elapsed = (now - last_flush_time) * 1000
+                    if elapsed >= MAX_WAIT_MS:
+                        sentence = buffer.rstrip()
+                        buffer = ""
+                        if sentence:
+                            logger.info("🗣️ Timer: {}...", sentence[:60])
+                            threading.Thread(target=self._speak_sync, args=(sentence,), daemon=True).start()
+                            last_flush_time = now
+                        continue
+
+                break
+
+        remaining = buffer.strip()
+        if remaining:
+            logger.info("🗣️ Final: {}...", remaining[:60])
+            threading.Thread(target=self._speak_sync, args=(remaining,), daemon=True).start()
 
     def set_engine(self, engine: str):
         """

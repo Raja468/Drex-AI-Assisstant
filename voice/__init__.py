@@ -1,21 +1,26 @@
 """
-DREX Voice Module
+DREX Voice Package (Sprint 4).
 
-Provides:
-  - Listener: Resilient continuous/single-utterance microphone input
-  - Speaker: Dual-engine TTS (pyttsx3 offline + edge-tts online)
-  - VoiceActivityDetector: Real-time VAD using webrtcvad (optional)
-  - WakeWordDetector: Background wake word detection (optional)
+Public API:
+
+    from voice import VoiceManager, VoiceState, ConversationMode
 """
 
-from voice.listener import Listener
-from voice.speaker import Speaker
-from voice.vad import VoiceActivityDetector
-from voice.wake_word import WakeWordDetector
+from voice.voice_manager    import VoiceManager, VoiceState
+from voice.conversation_mode import ConversationMode
+from voice.speech_to_text   import SpeechToText
+from voice.tts_engine       import TTSEngine
+from voice.vad              import VAD
+from voice.audio_stream     import AudioStream
+from voice.interruption_manager import InterruptionManager
 
 __all__ = [
-    "Listener",
-    "Speaker",
-    "VoiceActivityDetector",
-    "WakeWordDetector",
+    "VoiceManager",
+    "VoiceState",
+    "ConversationMode",
+    "SpeechToText",
+    "TTSEngine",
+    "VAD",
+    "AudioStream",
+    "InterruptionManager",
 ]
