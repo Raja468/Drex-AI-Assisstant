@@ -35,7 +35,7 @@ class PermissionEvaluator:
     def risk_level_for_action(self, action: str) -> RiskLevel:
         a = action.lower().strip()
         if a in ("shutdown","restart","delete_file","empty_trash"): return RiskLevel.CRITICAL
-        if a in ("close_app","kill","create_file","create_folder","screenshot"): return RiskLevel.HIGH
+        if a in ("close_app","kill","create_file","create_folder","screenshot","sleep","lock","press_key","hotkey","type_text"): return RiskLevel.HIGH
         if a in ("open_app","search","open_url","open_site"): return RiskLevel.LOW
         return RiskLevel.SAFE
 

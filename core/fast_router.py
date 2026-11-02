@@ -40,7 +40,12 @@ class FastRouter:
         r"open (youtube)": "_open_youtube",
 
         # ── System ─────────────────────────────────────────────
-        r"(take a )?screenshot": "_take_screenshot",
+        # NOTE (safety fix): screenshot was removed from the instant
+        # commands on purpose. FastRouter runs before any permission
+        # check, so a screenshot here bypassed the DANGEROUS
+        # classification in core/permission.py. Screenshots now fall
+        # through to the gated automation/intent path, which asks for
+        # confirmation. Do not re-add it here without a permission gate.
         r"what(?:'s| is) (my )?(battery|battery level)": "_get_battery",
         r"(what(?:'s| is)|show) (my )?ip( address)?": "_get_ip",
         r"(increase|turn up) volume": "_volume_up",
@@ -86,6 +91,10 @@ class FastRouter:
         Returns:
             A plain string response (no AI calls).
         """
+        # Fail-closed: even a direct execute() call must not take a
+        # screenshot from the permission-free fast path.
+        if method_name == "_take_screenshot":
+            return "Screenshot is not available as an instant command — it needs confirmation through the gated automation path."
         handler = getattr(self, method_name, None)
         if handler is None:
             logger.warning("FastRouter: no handler for '{}'", method_name)
