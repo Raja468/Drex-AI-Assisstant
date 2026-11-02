@@ -17,7 +17,19 @@ class ToolExecutor:
         errors = tool.validate(request)
         if errors: return self._fail(request, f"Validation failed: {'; '.join(errors)}")
         self._publish("tool.started", request, meta)
-        if not self._evaluator.check(request.tool_name, meta.risk_level, request.arguments):
+        # Per-action risk: a tool's metadata is its worst case, but an
+        # action like volume_up must not be treated as CRITICAL, and an
+        # action like shutdown must never be treated as SAFE just because
+        # it shares a tool with volume controls. Use the action's risk
+        # when one is supplied, otherwise fall back to the tool metadata.
+        effective_risk = meta.risk_level
+        action = request.arguments.get("action") if isinstance(request.arguments, dict) else None
+        if action:
+            try:
+                effective_risk = self._evaluator.risk_level_for_action(str(action))
+            except Exception:
+                effective_risk = meta.risk_level
+        if not self._evaluator.check(request.tool_name, effective_risk, request.arguments):
             self._publish("tool.permission_required", request, meta)
             return ToolResult(success=False, error=f"Permission denied: {request.tool_name}")
         start = time.perf_counter()

@@ -189,7 +189,10 @@ class SystemTool(BaseTool):
             self._system = SystemControl()
         return self._system
     def metadata(self) -> ToolMetadata:
-        return ToolMetadata(name="system", description="Control system volume, power, and query info", category="system", risk_level=RiskLevel.SAFE)
+        # Worst-case risk for a tool that can shut down / restart the
+        # machine. ToolExecutor downgrades this per-action (volume and
+        # system_info stay SAFE) via PermissionEvaluator.risk_level_for_action.
+        return ToolMetadata(name="system", description="Control system volume, power, and query info", category="system", risk_level=RiskLevel.CRITICAL)
     def validate(self, request: ToolRequest) -> list[str]:
         valid = {"volume_up","volume_down","mute","set_volume","shutdown","restart","sleep","lock","cancel_shutdown","system_info","press_key","hotkey","type_text"}
         a = request.arguments.get("action")

@@ -59,7 +59,9 @@ def validate_config():
             warnings.append("  ⚠  GROQ_API_KEY not set in .env")
         if not ai.openrouter_api_key or ai.openrouter_api_key == "your_openrouter_key_here":
             warnings.append("  ⚠  OPENROUTER_API_KEY not set in .env")
-        if len(warnings) == 3:
+        if not ai.cerebras_api_key or ai.cerebras_api_key == "your_cerebras_key_here":
+            warnings.append("  ⚠  CEREBRAS_API_KEY not set in .env")
+        if len(warnings) == 4:
             warnings.append("  ✖  No AI provider configured — needs at least one API key!")
     except Exception as e:
         warnings.append(f"  ✖  Config error: {e}")
